@@ -5,8 +5,8 @@ Production-ready Docker Compose setup for **Odoo 18 Community Edition** with **P
 ## Quick Start
 
 ```bash
-git clone -b podman https://github.com/WOOWTECH/Woow_odoo_docker_compose_all.git
-cd Woow_odoo_docker_compose_all
+git clone https://github.com/WOOWTECH/Woow_podman_odoo.git
+cd Woow_podman_odoo
 cp .env.example .env
 # Edit .env with your settings
 docker compose up -d
@@ -27,8 +27,8 @@ Deploy this project instantly using Portainer's Stack feature with our GitHub re
 
    | Field | Value |
    |-------|-------|
-   | **Repository URL** | `https://github.com/WOOWTECH/Woow_odoo_docker_compose_all` |
-   | **Repository reference** | `refs/heads/podman` |
+   | **Repository URL** | `https://github.com/WOOWTECH/Woow_podman_odoo` |
+   | **Repository reference** | `refs/heads/main` |
    | **Compose path** | `docker-compose.yml` |
 
 5. Click **Deploy the stack**
@@ -38,7 +38,7 @@ Deploy this project instantly using Portainer's Stack feature with our GitHub re
 1. Copy the raw URL of `docker-compose.yml`:
 
    ```
-   https://raw.githubusercontent.com/WOOWTECH/Woow_odoo_docker_compose_all/podman/docker-compose.yml
+   https://raw.githubusercontent.com/WOOWTECH/Woow_podman_odoo/main/docker-compose.yml
    ```
 
 2. Log in to Portainer → **Stacks** → **Add stack** → **Web editor**
@@ -63,8 +63,8 @@ Deploy this project instantly using Portainer's Stack feature with our GitHub re
 
    | 欄位 | 值 |
    |------|-----|
-   | **Repository URL** | `https://github.com/WOOWTECH/Woow_odoo_docker_compose_all` |
-   | **Repository reference** | `refs/heads/podman` |
+   | **Repository URL** | `https://github.com/WOOWTECH/Woow_podman_odoo` |
+   | **Repository reference** | `refs/heads/main` |
    | **Compose path** | `docker-compose.yml` |
 
 5. 點擊 **Deploy the stack**
@@ -74,7 +74,7 @@ Deploy this project instantly using Portainer's Stack feature with our GitHub re
 1. 複製 `docker-compose.yml` 的 Raw URL：
 
    ```
-   https://raw.githubusercontent.com/WOOWTECH/Woow_odoo_docker_compose_all/podman/docker-compose.yml
+   https://raw.githubusercontent.com/WOOWTECH/Woow_podman_odoo/main/docker-compose.yml
    ```
 
 2. 登入 Portainer → **Stacks** → **Add stack** → **Web editor**
@@ -93,10 +93,9 @@ Deploy this project instantly using Portainer's Stack feature with our GitHub re
 | `postgres/` | PostgreSQL data |
 | `docs/` | Additional documentation |
 
-## Other Deployment Options
+---
 
-| Platform | Branch | Description |
-|----------|--------|-------------|
-| **Docker / Podman** | [`podman`](../../tree/podman) | ← You are here |
-| Kubernetes (K3s) | [`k3s`](../../tree/k3s) | K8s manifests with Kustomize |
-| Home Assistant | [`ha`](../../tree/ha) | HA add-on with one-click install |
+## Other deployment platforms
+
+- **K3s/Kubernetes (Helm chart)** → [Woow_k3s_odoo](https://github.com/WOOWTECH/Woow_k3s_odoo)
+- **Home Assistant add-on** → [Woow_ha_odoo](https://github.com/WOOWTECH/Woow_ha_odoo)
