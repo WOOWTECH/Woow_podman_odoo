@@ -1,36 +1,52 @@
-# Secure Odoo 18 runbook / 安全 Odoo 18 操作手冊
+# Odoo 18 Quadlet runbook / Odoo 18 Quadlet 操作手冊
 
-## Prerequisites / 前置需求
-Use a non-root Linux account with Podman 4.9.3, podman-compose 1.0.6, user systemd, Python 3, OpenSSL, and curl. 請使用一般 Linux 帳號及上述固定版本工具。
+A runbook for AI assistants and operators. The README has the details and the reasons; this page is
+the short path. 給 AI 助手與維運人員的操作手冊；細節與理由見 README，這裡是最短路徑。
 
-## Deploy / 部署
-Run `scripts/deploy.sh`; reruns preserve credentials and data. On a fresh volume, open the local URL and create or restore an Odoo database; configuration does not force the empty `postgres` maintenance database. 執行部署腳本；重複執行保留密碼及資料。全新資料卷請開啟本機網址建立或還原 Odoo 資料庫；設定不會強迫使用空的 `postgres` 維護資料庫。
+## Rules / 規則
 
-## Verify and local URL / 驗證與本機網址
-Run `scripts/verify.sh` and open `http://127.0.0.1:18069`. PostgreSQL is not mapped to the host. The read-only standalone health helper probes `/web/health` without initializing a database and fails on HTTP errors. 執行驗證並使用 loopback 網址；資料庫不映射至主機。唯讀的獨立健康檢查程式會探測 `/web/health`，不初始化資料庫，並在 HTTP 錯誤時失敗。
+- Run as the user that owns the containers, in a real login session (ssh or console). Never `sudo`.
+  以擁有容器的使用者、在真正的登入工作階段執行，絕不使用 `sudo`。
+- Never put a password on a command line, in the env file or in a commit; they live in podman secrets.
+  密碼不可出現在指令列、env 檔或 commit，一律存於 podman secrets。
+- Never print a secret into a shared log or chat. Read it only in a private terminal.
+  不要把 secret 印到共享 log 或對話中，只在私人終端機讀取。
+- The units are `odoo.service` and `odoo-db.service`. A unit named `odoo18.service` belongs to the
+  retired compose deployment and would shadow them.
+  單元是 `odoo.service` 與 `odoo-db.service`；`odoo18.service` 屬於已淘汰的 compose 部署，會蓋掉它們。
 
-## User systemd and lingering / 使用者 systemd 與 lingering
-Run `scripts/install-systemd.sh`, check `systemctl --user status odoo18.service odoo18-health.timer`, and ask an administrator to run `loginctl enable-linger "$USER"` once if needed. The timer drives both containers' native healthchecks; its triggered oneshot is not enabled directly. 安裝使用者單元並檢查主服務及健康檢查計時器；觸發的 oneshot 不會直接啟用，並視需要由管理員啟用 lingering。
+## Fresh install / 全新安裝
 
-## Tailnet-only remote gate / 僅限 tailnet 遠端驗收
-After separate gateway configuration, run `ODOO_REMOTE_URL=http://<gateway-tailnet-name>:18069 bash tests/live-remote.sh`. Missing infrastructure is SKIP, not PASS. gateway 須另行設定；無環境時記錄 SKIP。
+```bash
+git clone https://github.com/WOOWTECH/Woow_podman_odoo.git ~/Woow_podman_odoo
+cd ~/Woow_podman_odoo
+bash tests/dryrun.sh                       # static check on this host: same result as CI
+scripts/install.sh --accept-defaults       # or run once, edit ~/.config/odoo18/odoo18.env, run again
+tests/smoke.sh                             # every check must PASS
+podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-password   # private terminal
+```
 
-## Backup / 備份
-Run `scripts/backup.sh`; every private timestamped archive is checksum validated. 執行備份腳本；每份私人時間戳記檔都經校驗。
+Port already taken / 埠已被占用：`scripts/install.sh --set WOOW_ODOO_PORT=28069`.
 
-## Restore / 還原
-Run `scripts/restore.sh --archive backups/<archive>.tar --confirm-restore odoo18`. Validation and a pre-restore backup precede mutation. 使用明確確認參數；先驗證並建立還原前備份。
+## Day 2 / 日常維運
 
-## Safe removal and purge / 安全移除與清除
-`scripts/remove.sh` preserves data. `scripts/remove.sh --purge-data --confirm-purge odoo18` removes exact labeled data/runtime but preserves backups. 一般移除保留資料；雙重確認才清除資料且仍保留備份。
+| Task | Command |
+|---|---|
+| Status | `systemctl --user status odoo.service odoo-db.service` |
+| Logs | `journalctl --user -u odoo.service -n 100` |
+| Change a setting | edit `~/.config/odoo18/odoo18.env` or `config/odoo.conf.template`, then `scripts/install.sh` |
+| Add addons | copy into `~/.local/share/odoo18/addons`, `chmod -R o+rX`, restart `odoo.service`, then `-u <module>` |
+| Upgrade | `git pull && scripts/upgrade.sh` (automatic unit rollback on failure) |
+| Backup | `scripts/backup.sh` |
+| Restore | `scripts/restore.sh --archive <file> --confirm-restore odoo18` |
+| Rotate passwords | `scripts/rotate-secrets.sh --db --admin` |
+| Remove | `scripts/uninstall.sh` (keeps data) or `scripts/uninstall.sh --purge --confirm-purge odoo18` |
 
-## Upgrades and digest rotation / 升級與 digest 輪替
-Review and change the release tag and digest together, then run the complete static/local/remote matrix. Never use a floating pull. 同時審查更新 tag 與 digest，並執行完整驗收。
+Remote host / 遠端主機：`ssh <host> 'cd ~/Woow_podman_odoo && git pull && scripts/upgrade.sh'`.
 
-## Troubleshooting / 疑難排解
-Use bounded `podman logs --tail 30`, never echo secrets, and never bypass account-ID or resource-label failures. 使用有限日誌，不輸出密碼，亦不略過帳號 ID 或標籤檢查。
+## Done when / 完成條件
 
-## Security boundary / 安全邊界
-Runtime secrets are independent mode-`600` files with exact namespace ownership. Odoo is loopback-only; remote access requires the separately managed Headscale/Tailscale gateway. 執行期密碼互相獨立且具精確權限；Odoo 僅限 loopback，遠端須經獨立管理的 tailnet gateway。
-
-See `README.md` for commands, ownership details, archive behavior, and operator responsibilities. 完整命令、擁有權、備份行為與責任界線請見 README。
+- `tests/smoke.sh` ends with `0 failed`.
+- `systemctl --user list-dependencies default.target --plain | grep -wE 'odoo(-db)?\.service'` lists
+  both units (they start at boot through linger).
+- A second `scripts/install.sh` reports `nothing to restart or start`.
