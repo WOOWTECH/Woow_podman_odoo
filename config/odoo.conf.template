@@ -1,12 +1,16 @@
 [options]
+; Rendered by scripts/install.sh into the odoo18-odoo-conf podman secret, which is mounted read-only
+; at /etc/odoo/odoo.conf (uid 100, mode 0400). The tokens are filled from the odoo18-postgres-password
+; and odoo18-admin-password secrets and from ~/.config/odoo18/odoo18.env; config/odoo.conf.render-vars
+; lists them. The rendered file only ever exists inside podman's secret store. Never commit one.
 addons_path = /mnt/extra-addons
 data_dir = /var/lib/odoo
-db_host = db
+db_host = odoo18-db
 db_port = 5432
 db_user = odoo
-db_password = @POSTGRES_PASSWORD@
-admin_passwd = @ODOO_ADMIN_PASSWORD@
-list_db = True
+db_password = @@POSTGRES_PASSWORD@@
+admin_passwd = @@ODOO_ADMIN_PASSWORD@@
+list_db = @@WOOW_ODOO_LIST_DB@@
 log_level = info
 workers = 0
 max_cron_threads = 1
