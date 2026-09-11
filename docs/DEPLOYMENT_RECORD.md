@@ -1,152 +1,56 @@
-# Deployment Record | 部署記錄
+# Deployment acceptance record / 部署驗收紀錄
 
-## Successful Deployment Details | 成功部署詳情
+This is an evidence template. Record only observed results; never record credentials, archive contents, or tailnet authentication material.
+本檔僅為證據範本；只填寫實際結果，絕不可記錄密碼、備份內容或 tailnet 認證資料。
 
-**Date | 日期:** 2026-02-17
-**Status | 狀態:** SUCCESS | 成功
+## Prerequisites / 前置需求
+- Date (UTC) / 日期：`2026-08-27T17:06:33Z`
+- Operator / 操作者：`repository implementation agent`
+- Commit：`a717843` (implementation tip before this evidence update)
+- Host and OS / 主機與系統：`repository test environment; container runtime unavailable`
+- Podman version：`NOT RUN — executable unavailable`
+- podman-compose version：`NOT RUN — executable unavailable`
+- Image IDs / 映像 ID：`NOT RUN — executable unavailable`
+- Registry digest verification / registry digest 驗證：`PASS — Docker Registry v2 HEAD returned odoo sha256:259fa933bf3ee7f3e375bd74d1e0bc28bd75955159723be477359e0fdb8acf67 and pgvector sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9`
 
----
+## Static acceptance / 靜態驗收
+- `bash tests/run.sh`：`PASS — 36 tests`
+- Shell/Python syntax and `git diff --check` / Shell、Python 語法及 diff 檢查：`PASS`
+- Secret-pattern scan / 密碼樣式掃描：`PASS — no matches outside plans`
+- Compose render / Compose render：`NOT RUN — podman-compose unavailable`
 
-## Deployment Summary | 部署摘要
+## Deploy / 部署
+- First deploy / 首次部署：`NOT RUN — Podman unavailable; no remote host was mutated`
+- Idempotent second deploy / 第二次冪等部署：`NOT RUN — Podman unavailable`
 
-### Components Deployed | 已部署組件
+## Verify and local URL / 驗證與本機網址
+- `scripts/verify.sh`：`NOT RUN — Podman unavailable`
+- `bash tests/live-local.sh`：`NOT RUN — Podman unavailable`
+- Observed local URL / 實測本機網址：`http://127.0.0.1:18069` (result: `NOT RUN`)
 
-| Component | Image | Version | Status |
-|-----------|-------|---------|--------|
-| Odoo | odoo:18 | 18 | Running |
-| PostgreSQL | postgres:16 + pgvector | 16.12 | Running |
-| pgvector | v0.7.4 | 0.7.4 | Available |
+## User systemd and lingering / 使用者 systemd 與 lingering
+- Unit status / 單元狀態：`NOT RUN`
+- Linger status / linger 狀態：`NOT RUN`
 
-### Verification Results | 驗證結果
+## Tailnet-only remote gate / 僅限 tailnet 遠端驗收
+- Result / 結果：`SKIP (exit 77) — ODOO_REMOTE_URL was intentionally unset; no remote gateway/client was used during repository-only implementation`
+- Command origin and gateway / 命令來源與 gateway：`<not run>`
 
-```
-# Container Status
-odoo18-db   Up
-odoo18-web  Up      0.0.0.0:18069->8069/tcp
+## Backup / 備份
+- Archive mode/validation / 備份權限與驗證：`NOT RUN`
 
-# HTTP Test
-HTTP/1.1 303 SEE OTHER
-Server: Werkzeug/3.0.1 Python/3.12.3
-Location: /odoo
+## Restore / 還原
+- Backup/restore drill and post-restore verification / 備份還原演練與驗證：`NOT RUN`
 
-# pgvector Extension
-name   | default_version | installed_version
-vector | 0.7.4           |
-```
+## Safe removal and purge / 安全移除與清除
+- Default removal and data preservation / 一般移除與資料保留：`NOT RUN`
+- Purge (only if intentionally tested) / 清除（僅限刻意測試）：`NOT RUN`
 
----
+## Upgrades and digest rotation / 升級與 digest 輪替
+- No rotation performed; approved release/digest pins remain in Compose. / 未執行輪替；Compose 保持核准的 release/digest。
 
-## Files Created | 建立的檔案
+## Troubleshooting / 疑難排解
+- Observations / 觀察：`none recorded`
 
-```
-.
-├── docker-compose.yml      (1061 bytes) - Main orchestration
-├── .env                    (187 bytes)  - Environment config
-├── .env.example            (236 bytes)  - Example config
-├── .gitignore              (199 bytes)  - Git ignore rules
-├── postgres/
-│   └── Dockerfile          - PostgreSQL 16 + pgvector
-├── addons/
-│   └── .gitkeep            - Custom modules placeholder
-├── config/
-│   └── odoo.conf           - Odoo configuration
-├── docs/
-│   ├── plans/
-│   │   └── 2026-02-17-odoo18-docker-compose-design.md
-│   └── DEPLOYMENT_RECORD.md (this file)
-└── README.md               - Bilingual documentation
-```
-
----
-
-## Docker Volumes Created | 建立的 Docker Volumes
-
-| Volume Name | Purpose | Mount Point |
-|-------------|---------|-------------|
-| odoo18-db-data | PostgreSQL data | /var/lib/postgresql/data |
-| odoo18-web-data | Odoo filestore | /var/lib/odoo |
-
----
-
-## Network Configuration | 網路配置
-
-| Network | Driver | Purpose |
-|---------|--------|---------|
-| odoo18-network | bridge | Internal communication |
-
----
-
-## Environment Variables Used | 使用的環境變數
-
-```bash
-POSTGRES_USER=odoo
-POSTGRES_PASSWORD=odoo18_secure_pass_2026
-POSTGRES_DB=postgres
-ODOO_PORT=18069
-```
-
----
-
-## Commands to Reproduce | 重現部署的指令
-
-### Start Services | 啟動服務
-
-```bash
-# Using Docker Compose
-docker compose up -d
-
-# Using Podman Compose
-podman-compose up -d
-```
-
-### Verify Deployment | 驗證部署
-
-```bash
-# Check containers
-docker compose ps   # or podman ps
-
-# Test HTTP
-curl -I http://localhost:18069
-
-# Check pgvector
-docker exec odoo18-db psql -U odoo -d postgres -c "SELECT * FROM pg_available_extensions WHERE name = 'vector';"
-```
-
-### Enable pgvector in Database | 在資料庫啟用 pgvector
-
-```bash
-docker exec odoo18-db psql -U odoo -d your_database_name -c "CREATE EXTENSION IF NOT EXISTS vector;"
-```
-
----
-
-## Access Information | 存取資訊
-
-| Service | URL | Default Credentials |
-|---------|-----|---------------------|
-| Odoo Web | http://localhost:18069 | Create on first access |
-| Database Manager | http://localhost:18069/web/database/manager | Master: admin |
-
----
-
-## For AI Redeployment | AI 重新部署指南
-
-### Quick Redeploy
-
-1. Verify all files exist in the directory
-2. Ensure `.env` has correct `POSTGRES_PASSWORD`
-3. Run: `docker compose up -d` or `podman-compose up -d`
-4. Verify: `curl -I http://localhost:18069` should return 303 redirect
-
-### If Starting Fresh
-
-1. Copy `.env.example` to `.env`
-2. Set secure password in `.env`
-3. Run: `docker compose up -d`
-4. Wait 30-60 seconds for PostgreSQL initialization
-5. Access: http://localhost:18069
-
----
-
-**Recorded by:** Claude AI
-**Last Updated:** 2026-02-17
+## Security boundary / 安全邊界
+- Loopback-only Odoo, private database, exact labels, runtime ownership, and secret-leak checks / loopback Odoo、私人資料庫、精確標籤、執行期擁有權及密碼外洩檢查：`NOT RUN`

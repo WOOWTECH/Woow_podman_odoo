@@ -1,5 +1,7 @@
 # Environment files with secrets
 .env
+.runtime/
+backups/
 
 # Odoo filestore (if using bind mount)
 filestore/

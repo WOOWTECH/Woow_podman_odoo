@@ -1,285 +1,36 @@
-# Skill: Deploy Odoo 18 Docker Compose
+# Secure Odoo 18 runbook / 安全 Odoo 18 操作手冊
 
-## Metadata
+## Prerequisites / 前置需求
+Use a non-root Linux account with Podman 4.9.3, podman-compose 1.0.6, user systemd, Python 3, OpenSSL, and curl. 請使用一般 Linux 帳號及上述固定版本工具。
 
-- **Name:** deploy-odoo18
-- **Version:** 1.0.0
-- **Description:** Deploy Odoo 18 Community Edition with PostgreSQL 16 + pgvector via Docker Compose
-- **Trigger:** User asks to deploy Odoo 18, set up Odoo, or create Odoo Docker environment
-- **Repository:** https://github.com/WOOWTECH/Woow_odoo_docker_compose_all
+## Deploy / 部署
+Run `scripts/deploy.sh`; reruns preserve credentials and data. On a fresh volume, open the local URL and create or restore an Odoo database; configuration does not force the empty `postgres` maintenance database. 執行部署腳本；重複執行保留密碼及資料。全新資料卷請開啟本機網址建立或還原 Odoo 資料庫；設定不會強迫使用空的 `postgres` 維護資料庫。
 
----
+## Verify and local URL / 驗證與本機網址
+Run `scripts/verify.sh` and open `http://127.0.0.1:18069`. PostgreSQL is not mapped to the host. The read-only standalone health helper probes `/web/health` without initializing a database and fails on HTTP errors. 執行驗證並使用 loopback 網址；資料庫不映射至主機。唯讀的獨立健康檢查程式會探測 `/web/health`，不初始化資料庫，並在 HTTP 錯誤時失敗。
 
-## Prerequisites Check
+## User systemd and lingering / 使用者 systemd 與 lingering
+Run `scripts/install-systemd.sh`, check `systemctl --user status odoo18.service odoo18-health.timer`, and ask an administrator to run `loginctl enable-linger "$USER"` once if needed. The timer drives both containers' native healthchecks; its triggered oneshot is not enabled directly. 安裝使用者單元並檢查主服務及健康檢查計時器；觸發的 oneshot 不會直接啟用，並視需要由管理員啟用 lingering。
 
-Before deploying, verify:
+## Tailnet-only remote gate / 僅限 tailnet 遠端驗收
+After separate gateway configuration, run `ODOO_REMOTE_URL=http://<gateway-tailnet-name>:18069 bash tests/live-remote.sh`. Missing infrastructure is SKIP, not PASS. gateway 須另行設定；無環境時記錄 SKIP。
 
-```bash
-# Check Docker/Podman is available
-docker --version || podman --version
+## Backup / 備份
+Run `scripts/backup.sh`; every private timestamped archive is checksum validated. 執行備份腳本；每份私人時間戳記檔都經校驗。
 
-# Check Docker Compose is available
-docker compose version || podman-compose --version
+## Restore / 還原
+Run `scripts/restore.sh --archive backups/<archive>.tar --confirm-restore odoo18`. Validation and a pre-restore backup precede mutation. 使用明確確認參數；先驗證並建立還原前備份。
 
-# Check available RAM (need 4GB+)
-free -h
+## Safe removal and purge / 安全移除與清除
+`scripts/remove.sh` preserves data. `scripts/remove.sh --purge-data --confirm-purge odoo18` removes exact labeled data/runtime but preserves backups. 一般移除保留資料；雙重確認才清除資料且仍保留備份。
 
-# Check available disk (need 10GB+)
-df -h .
-```
+## Upgrades and digest rotation / 升級與 digest 輪替
+Review and change the release tag and digest together, then run the complete static/local/remote matrix. Never use a floating pull. 同時審查更新 tag 與 digest，並執行完整驗收。
 
----
+## Troubleshooting / 疑難排解
+Use bounded `podman logs --tail 30`, never echo secrets, and never bypass account-ID or resource-label failures. 使用有限日誌，不輸出密碼，亦不略過帳號 ID 或標籤檢查。
 
-## Required Files
+## Security boundary / 安全邊界
+Runtime secrets are independent mode-`600` files with exact namespace ownership. Odoo is loopback-only; remote access requires the separately managed Headscale/Tailscale gateway. 執行期密碼互相獨立且具精確權限；Odoo 僅限 loopback，遠端須經獨立管理的 tailnet gateway。
 
-The following files MUST exist in the project root. If any are missing, clone the repo first:
-
-```bash
-git clone https://github.com/WOOWTECH/Woow_odoo_docker_compose_all.git
-cd Woow_odoo_docker_compose_all
-```
-
-### File Checklist
-
-| File | Purpose | Required |
-|------|---------|----------|
-| `docker-compose.yml` | Service orchestration (Odoo 18 + PostgreSQL 16) | YES |
-| `postgres/Dockerfile` | Custom PostgreSQL 16 image with pgvector v0.7.4 | YES |
-| `.env` | Environment variables (passwords, ports) | YES |
-| `.env.example` | Template for .env | YES (for reference) |
-| `config/odoo.conf` | Odoo server configuration | YES |
-| `addons/.gitkeep` | Custom modules directory | YES (directory) |
-| `.gitignore` | Excludes .env from git | YES |
-
----
-
-## File Contents Reference
-
-### docker-compose.yml
-
-```yaml
-version: '3.8'
-name: odoo18
-
-services:
-  db:
-    build:
-      context: ./postgres
-      dockerfile: Dockerfile
-    container_name: odoo18-db
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER:-odoo}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      - POSTGRES_DB=${POSTGRES_DB:-postgres}
-    volumes:
-      - odoo-db-data:/var/lib/postgresql/data
-    networks:
-      - odoo-network
-    restart: unless-stopped
-
-  web:
-    image: odoo:18
-    container_name: odoo18-web
-    depends_on:
-      - db
-    ports:
-      - "${ODOO_PORT:-18069}:8069"
-    environment:
-      - HOST=db
-      - PORT=5432
-      - USER=${POSTGRES_USER:-odoo}
-      - PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-    volumes:
-      - odoo-web-data:/var/lib/odoo
-      - ./addons:/mnt/extra-addons
-      - ./config:/etc/odoo
-    networks:
-      - odoo-network
-    restart: unless-stopped
-
-volumes:
-  odoo-db-data:
-    name: odoo18-db-data
-  odoo-web-data:
-    name: odoo18-web-data
-
-networks:
-  odoo-network:
-    name: odoo18-network
-    driver: bridge
-```
-
-### postgres/Dockerfile
-
-```dockerfile
-FROM postgres:16
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    postgresql-server-dev-16 \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN git clone --branch v0.7.4 https://github.com/pgvector/pgvector.git /tmp/pgvector \
-    && cd /tmp/pgvector \
-    && make \
-    && make install \
-    && rm -rf /tmp/pgvector
-
-RUN apt-get update && apt-get remove -y \
-    build-essential \
-    git \
-    postgresql-server-dev-16 \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
-```
-
-### .env
-
-```bash
-POSTGRES_USER=odoo
-POSTGRES_PASSWORD=<SET_A_SECURE_PASSWORD>
-POSTGRES_DB=postgres
-ODOO_PORT=18069
-```
-
-### config/odoo.conf
-
-```ini
-[options]
-addons_path = /mnt/extra-addons
-admin_passwd = admin
-log_level = info
-workers = 0
-max_cron_threads = 1
-limit_memory_hard = 2684354560
-limit_memory_soft = 2147483648
-limit_time_cpu = 600
-limit_time_real = 1200
-proxy_mode = False
-```
-
----
-
-## Deployment Steps
-
-### Step 1: Configure Environment
-
-```bash
-cp .env.example .env
-# Set a secure password - DO NOT use default in production
-```
-
-### Step 2: Start Services
-
-```bash
-# Docker Compose
-docker compose up -d
-
-# OR Podman Compose
-podman-compose up -d
-```
-
-### Step 3: Verify Deployment
-
-```bash
-# Check containers are running
-docker compose ps
-# Expected: odoo18-web (Up), odoo18-db (Up)
-
-# Test HTTP access
-curl -I http://localhost:18069
-# Expected: HTTP/1.1 303 SEE OTHER, Location: /odoo
-
-# Verify pgvector is available
-docker exec odoo18-db psql -U odoo -d postgres \
-  -c "SELECT * FROM pg_available_extensions WHERE name = 'vector';"
-# Expected: vector | 0.7.4
-```
-
-### Step 4: Access Odoo
-
-- URL: `http://localhost:18069`
-- First time: Create a new database via the database manager
-- Master password: `admin` (from odoo.conf, change for production)
-
----
-
-## Common Operations
-
-### Enable pgvector on a database
-
-```bash
-docker exec odoo18-db psql -U odoo -d <DATABASE_NAME> \
-  -c "CREATE EXTENSION IF NOT EXISTS vector;"
-```
-
-### Stop services
-
-```bash
-docker compose down
-```
-
-### View logs
-
-```bash
-docker compose logs -f        # All services
-docker compose logs -f web    # Odoo only
-docker compose logs -f db     # PostgreSQL only
-```
-
-### Backup database
-
-```bash
-docker exec odoo18-db pg_dump -U odoo <DATABASE_NAME> > backup_$(date +%Y%m%d).sql
-```
-
-### Restore database
-
-```bash
-docker exec -i odoo18-db psql -U odoo <DATABASE_NAME> < backup.sql
-```
-
-### Restart Odoo only
-
-```bash
-docker compose restart web
-```
-
----
-
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| Odoo can't connect to DB | `docker compose restart web` (DB may not be ready yet) |
-| Permission error on addons | `sudo chown -R 101:101 ./addons` |
-| Port 18069 already in use | Change `ODOO_PORT` in `.env` |
-| pgvector not found | Rebuild DB image: `docker compose build db` |
-| Container keeps restarting | Check logs: `docker compose logs db` or `docker compose logs web` |
-
----
-
-## Architecture Summary
-
-```
-Host:18069 → odoo18-web (odoo:18) → odoo18-db (postgres:16+pgvector)
-                │                         │
-                ├─ /var/lib/odoo          ├─ /var/lib/postgresql/data
-                │  (odoo18-web-data vol)  │  (odoo18-db-data vol)
-                ├─ /mnt/extra-addons      │
-                │  (./addons bind mount)  │
-                └─ /etc/odoo              │
-                   (./config bind mount)  │
-                                          │
-            Network: odoo18-network (bridge)
-```
-
----
-
-## Version History
-
-| Date | Version | Change |
-|------|---------|--------|
-| 2026-02-17 | 1.0.0 | Initial deployment - Odoo 18 + PostgreSQL 16 + pgvector 0.7.4 |
+See `README.md` for commands, ownership details, archive behavior, and operator responsibilities. 完整命令、擁有權、備份行為與責任界線請見 README。

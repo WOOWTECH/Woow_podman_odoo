@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule native healthchecks for the rootless Odoo 18 stack
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=odoo18-health.service
+
+[Install]
+WantedBy=timers.target
