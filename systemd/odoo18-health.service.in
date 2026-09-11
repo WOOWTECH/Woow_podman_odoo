@@ -1,8 +1,0 @@
-[Unit]
-Description=Run native healthchecks for the rootless Odoo 18 stack
-
-[Service]
-Type=oneshot
-WorkingDirectory=@PROJECT_ROOT@
-ExecStart=@PROJECT_ROOT@/scripts/healthcheck.sh
-TimeoutStartSec=30

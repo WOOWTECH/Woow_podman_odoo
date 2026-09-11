@@ -1,23 +1,18 @@
-# Environment files with secrets
+# Per-host settings live in ~/.config/odoo18/ and credentials in podman secrets; neither belongs here.
 .env
+*.env
+!config/*.env.example
+!tests/fixtures/*.env
 .runtime/
 backups/
-
-# Odoo filestore (if using bind mount)
-filestore/
 
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
+# OS / editor files
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+*.swp
