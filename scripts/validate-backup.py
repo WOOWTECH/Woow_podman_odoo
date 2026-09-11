@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Validate and, only after complete validation, extract an Odoo backup."""
+"""Validate and, only after complete validation, extract an Odoo backup.
+
+Harvested from the hardened compose deployment and adapted to the Quadlet layout: an archive holds
+one dump per Odoo database under databases/, the roles dump, the web volume, metadata and the
+checksum manifest, plus the two passwords when it was made with --include-secrets.
+"""
 import argparse
 import hashlib
 import os
@@ -7,10 +12,10 @@ from pathlib import Path, PurePosixPath
 import shutil
 import tarfile
 
-MAX_MEMBERS = 10000
-MAX_SIZE = 10 * 1024**3
-REQUIRED = {"database.dump", "roles.sql", "config/odoo.conf", "secrets/odoo_admin_password", "metadata.json", "SHA256SUMS"}
-ALLOWED_TOP = {"database.dump", "roles.sql", "volume", "config", "secrets", "metadata.json", "SHA256SUMS"}
+MAX_MEMBERS = 100000
+MAX_SIZE = 50 * 1024**3
+REQUIRED = {"roles.sql", "metadata.json", "SHA256SUMS"}
+ALLOWED_TOP = {"roles.sql", "databases", "volume", "secrets", "metadata.json", "SHA256SUMS"}
 
 
 def fail(message):
@@ -89,9 +94,11 @@ def validate_open(tf: tarfile.TarFile):
             h.update(chunk)
         if h.hexdigest() != digest:
             fail(f"checksum mismatch: {rel}")
-    database = tf.extractfile(regular["database.dump"])
-    if database is None or database.read(5) != b"PGDMP":
-        fail("database dump is not PostgreSQL custom format")
+    dumps = sorted(name for name in regular if name.startswith("databases/") and name.endswith(".dump"))
+    for rel in dumps:
+        database = tf.extractfile(regular[rel])
+        if database is None or database.read(5) != b"PGDMP":
+            fail(f"{rel} is not a PostgreSQL custom-format dump")
     return root
 
 

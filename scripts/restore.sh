@@ -1,144 +1,153 @@
 #!/usr/bin/env bash
+# scripts/restore.sh: restore an archive made by scripts/backup.sh. Ported from the hardened compose
+# variant: the archive is validated before anything is touched, a pre-restore backup is taken while
+# Odoo is stopped, and a failure after the first database change rolls the whole pre-restore archive
+# back before Odoo is allowed to serve again.
+#
+#   scripts/restore.sh --archive FILE --confirm-restore odoo18 [--restore-secrets]
+#
+#   --restore-secrets  also put the passwords from the archive (--include-secrets) into the podman
+#                      secrets and re-render odoo.conf. Without it the archive's roles are loaded and
+#                      the database role is then set back to this host's current password.
+#
+# Every database in the archive is dropped and recreated. Databases that are not in the archive are
+# left alone and reported.
+# shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 umask 077
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
-# shellcheck source=lib.sh
-source "$SCRIPT_DIR/lib.sh"
-archive= confirm=
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# shellcheck source=lib/quadlet-lib.sh
+. "$REPO/scripts/lib/quadlet-lib.sh"
+# shellcheck source=common.sh
+. "$REPO/scripts/common.sh"
+# shellcheck source=odoo-helpers.sh
+. "$REPO/scripts/odoo-helpers.sh"
+
+archive='' confirm='' restore_secrets=0
 while (($#)); do
- case $1 in
-  --archive) [[ $# -ge 2 ]] || die "--archive needs a path"; archive=$2; shift 2;;
-  --confirm-restore) [[ $# -ge 2 ]] || die "--confirm-restore needs odoo18"; confirm=$2; shift 2;;
-  *) die "usage: scripts/restore.sh --archive PATH --confirm-restore odoo18";;
- esac
+  case $1 in
+    --archive) (($# >= 2)) || ql_die "--archive needs a path"; archive=$2; shift ;;
+    --confirm-restore) (($# >= 2)) || ql_die "--confirm-restore needs the word $APP"; confirm=$2; shift ;;
+    --restore-secrets) restore_secrets=1 ;;
+    -h | --help) sed -n '2,16p' "$0"; exit 0 ;;
+    *) ql_die "unknown option $1 (see --help)" ;;
+  esac
+  shift
 done
-[[ -n "$archive" && "$confirm" == odoo18 ]] || die "restore requires --archive PATH --confirm-restore odoo18"
-archive=$(realpath "$archive"); [[ -f "$archive" ]] || die "archive not found"
+[[ -n $archive && $confirm == "$APP" ]] || ql_die "usage: scripts/restore.sh --archive FILE --confirm-restore $APP"
+archive=$(realpath -- "$archive")
+[[ -f $archive ]] || ql_die "archive not found: $archive"
+ql_require_rootless
+app_lock
 rollback_mode=${ODOO_RESTORE_ROLLBACK:-false}
-[[ "$rollback_mode" == true || "$rollback_mode" == false ]] || die "invalid internal rollback mode"
-export ODOO_DEPLOY_UID="$(id -u)"
-acquire_lifecycle_lock
-validate_resources; assert_runtime_files
-mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
-stage_parent=$(mktemp -d "$BACKUP_DIR/.restore.XXXXXX")
-cleanup_restore() {
-  status=$?
+
+stage_parent=$(mktemp -d "$BACKUP_ROOT/.restore.XXXXXX")
+mutation_started=0 pre_restore='' web_was_running=false stage=''
+old_stores=()
+# One EXIT trap for both paths: a failure after the first database change (including a ql_die, which
+# exits) must roll the pre-restore archive back before Odoo is allowed to serve again.
+cleanup() {
+  local status=$?
   trap - EXIT
-  "$PODMAN_BIN" unshare rm -rf "$stage_parent" >/dev/null 2>&1 || true
-  exit "$status"
-}
-trap cleanup_restore EXIT
-
-# Freeze the caller-controlled pathname into a private inode before validation.
-# Validation and extraction then also share one tar descriptor in the validator.
-staged_archive="$stage_parent/source.tar"
-python3 - "$archive" "$staged_archive" <<'PY'
-import os, shutil, sys
-source, target = sys.argv[1:]
-source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-try:
-    target_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o400)
-    try:
-        with os.fdopen(source_fd, "rb", closefd=False) as incoming, os.fdopen(target_fd, "wb", closefd=False) as outgoing:
-            shutil.copyfileobj(incoming, outgoing, 1024 * 1024)
-            outgoing.flush()
-            os.fsync(target_fd)
-    finally:
-        os.close(target_fd)
-finally:
-    os.close(source_fd)
-PY
-python3 "$SCRIPT_DIR/validate-backup.py" "$staged_archive" --extract-to "$stage_parent/extracted" >/dev/null
-stage="$stage_parent/extracted"
-web_was_running=$("$PODMAN_BIN" inspect --format '{{.State.Running}}' odoo18-web)
-[[ "$web_was_running" == true || "$web_was_running" == false ]] || die "cannot determine web running state"
-service_stopped=false mutation_started=false pre_restore= old= new=
-
-recovery_command() {
-  local command
-  [[ -n "$pre_restore" ]] || return 0
-  printf -v command '%q ' "$SCRIPT_DIR/restore.sh" --archive "$pre_restore" --confirm-restore odoo18
-  log "Recovery command: ${command% }"
-}
-restore_failed() {
-  status=$?
-  local rollback_ok=false
-  trap - ERR
   set +e
-  # Once any role/database command has begun, serving is forbidden until the
-  # complete pre-restore archive has itself been restored and verified.
-  compose stop web >/dev/null 2>&1
-  if [[ "$mutation_started" == true && "$rollback_mode" == false && -n "$pre_restore" ]]; then
-    if ODOO_RESTORE_ROLLBACK=true ODOO_RESTORE_MUTATED_ROLES="$stage/roles.sql" \
-         "$SCRIPT_DIR/restore.sh" --archive "$pre_restore" --confirm-restore odoo18; then
-      rollback_ok=true
-      [[ -n "$old" ]] && "$PODMAN_BIN" unshare rm -rf "$old" >/dev/null 2>&1
-      [[ -n "$new" ]] && "$PODMAN_BIN" unshare rm -rf "$new" >/dev/null 2>&1
+  if ((status != 0)); then
+    systemctl --user stop odoo.service >/dev/null 2>&1
+    if ((mutation_started)) && [[ $rollback_mode == false && -n $pre_restore ]]; then
+      ql_warn "restore failed after the first change; restoring the pre-restore archive"
+      if ODOO_RESTORE_ROLLBACK=true ODOO_RESTORE_MUTATED_ROLES="$stage/roles.sql" \
+        "$REPO/scripts/restore.sh" --archive "$pre_restore" --confirm-restore "$APP"; then
+        ql_warn "the pre-restore state is back and verified"
+      else
+        ql_warn "the rollback failed too; Odoo stays stopped so it cannot serve mixed state"
+        ql_warn "recovery command: scripts/restore.sh --archive $pre_restore --confirm-restore $APP"
+      fi
+    elif [[ $web_was_running == true ]]; then
+      systemctl --user start odoo.service >/dev/null 2>&1
     fi
   fi
-  if [[ "$mutation_started" == true ]]; then
-    if [[ "$rollback_ok" == true ]]; then
-      if [[ "$web_was_running" == true ]]; then compose start web || rollback_ok=false; else compose stop web >/dev/null 2>&1; fi
-    fi
-    if [[ "$rollback_ok" == true ]]; then
-      log "Restore failed; the complete pre-restore state was restored and verified."
-    else
-      compose stop web >/dev/null 2>&1
-      log "Restore failed; web remains stopped to prevent serving mixed state."
-    fi
-    recovery_command
-  elif [[ "$service_stopped" == true && "$web_was_running" == true ]]; then
-    compose start web >/dev/null 2>&1 || log "ERROR: could not restore prior web running state"
-  fi
+  podman unshare rm -rf -- "$stage_parent" >/dev/null 2>&1 || true
   exit "$status"
 }
-trap restore_failed ERR
+trap cleanup EXIT
 
-compose stop web
-service_stopped=true
-# A pre-restore snapshot is taken while web is already stopped, so its database
-# and filestore represent one quiesced point in time.
-if [[ "$rollback_mode" == false ]]; then pre_restore=$("$SCRIPT_DIR/backup.sh"); fi
-roles_prepared="$stage_parent/roles-idempotent.sql"
+# Freeze the caller's pathname into a private file, then validate and extract from that one file.
+staged=$stage_parent/source.tar
+cp -- "$archive" "$staged"
+chmod 400 "$staged"
+python3 "$REPO/scripts/validate-backup.py" "$staged" --extract-to "$stage_parent/extracted" >/dev/null \
+  || ql_die "the archive did not validate; nothing was changed"
+stage=$stage_parent/extracted
+
+mapfile -t dbs < <(find "$stage/databases" -maxdepth 1 -type f -name '*.dump' -printf '%f\n' 2>/dev/null | sed 's|\.dump$||' | LC_ALL=C sort || true)
+ql_info "archive holds ${#dbs[@]} database(s): ${dbs[*]:-none}"
+web_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-web 2>/dev/null || echo false)
+
+systemctl --user stop odoo.service
+[[ $(podman inspect --format '{{.State.Health.Status}}' odoo18-db 2>/dev/null) == healthy ]] \
+  || ql_die "odoo18-db is not healthy; refusing to restore"
+# The pre-restore snapshot is taken while Odoo is already stopped, so it is one quiesced point in time.
+if [[ $rollback_mode == false ]]; then
+  pre_restore=$("$REPO/scripts/backup.sh") || ql_die "the pre-restore backup failed; nothing was changed"
+  ql_info "pre-restore archive: $pre_restore"
+fi
+
+roles_prepared=$stage_parent/roles-idempotent.sql
 role_args=()
-if [[ "$rollback_mode" == true && -n ${ODOO_RESTORE_MUTATED_ROLES:-} ]]; then
-  [[ -f "$ODOO_RESTORE_MUTATED_ROLES" ]] || die "missing internal mutated-role record"
+if [[ $rollback_mode == true && -n ${ODOO_RESTORE_MUTATED_ROLES:-} ]]; then
+  [[ -f $ODOO_RESTORE_MUTATED_ROLES ]] || ql_die "missing internal mutated-role record"
   role_args=(--drop-roles-from "$ODOO_RESTORE_MUTATED_ROLES")
 fi
-python3 "$SCRIPT_DIR/make-roles-idempotent.py" "${role_args[@]}" <"$stage/roles.sql" >"$roles_prepared"
+python3 "$REPO/scripts/make-roles-idempotent.py" "${role_args[@]}" <"$stage/roles.sql" >"$roles_prepared"
 
-# Both SQL phases are strict and transactional. From this point onward every
-# error takes the full-archive rollback path above, never a local-only rollback.
-mutation_started=true
-"$PODMAN_BIN" exec -i odoo18-db psql -X --set=ON_ERROR_STOP=1 --single-transaction -U odoo -d postgres <"$roles_prepared"
-"$PODMAN_BIN" exec -i odoo18-db pg_restore -U odoo --clean --if-exists --exit-on-error --single-transaction -d postgres <"$stage/database.dump"
-mountpoint=$("$PODMAN_BIN" volume inspect --format '{{.Mountpoint}}' odoo18-web-data)
-new="$mountpoint/.filestore.restore.$$"; old="$mountpoint/.filestore.previous.$$"
-"$PODMAN_BIN" unshare mkdir -m 700 "$new"
-if [[ -d "$stage/volume/filestore" ]]; then "$PODMAN_BIN" unshare cp -a "$stage/volume/filestore/." "$new/"; fi
-"$PODMAN_BIN" unshare chown -R 100:101 "$new"
-if "$PODMAN_BIN" unshare test -e "$mountpoint/filestore"; then "$PODMAN_BIN" unshare mv "$mountpoint/filestore" "$old"; fi
-"$PODMAN_BIN" unshare mv "$new" "$mountpoint/filestore"
-install_runtime() {
- local source=$1 target=$2 owner=$3 tmp
- tmp=$(mktemp "$(dirname "$target")/.restore.XXXXXX")
- cp "$source" "$tmp"; chmod 600 "$tmp"; "$PODMAN_BIN" unshare chown "$owner" "$tmp"; mv -f "$tmp" "$target"
-}
-install_runtime "$stage/config/odoo.conf" "$RUNTIME_DIR/config/odoo.conf" 100:101
-install_runtime "$stage/secrets/odoo_admin_password" "$RUNTIME_DIR/secrets/odoo_admin_password" 0:0
-# Recover the DB secret from its single exact config field without exposing it in argv/logs.
-tmp_secret=$(mktemp "$RUNTIME_DIR/secrets/.restore.XXXXXX")
-while IFS= read -r line; do case "$line" in 'db_password = '*) printf '%s\n' "${line#db_password = }" >"$tmp_secret";; esac; done < <("$PODMAN_BIN" unshare cat "$RUNTIME_DIR/config/odoo.conf")
-[[ -s "$tmp_secret" ]] || die "restored config has no database password"
-chmod 600 "$tmp_secret"; "$PODMAN_BIN" unshare chown 999:999 "$tmp_secret"; mv -f "$tmp_secret" "$RUNTIME_DIR/secrets/postgres_password"
-assert_runtime_files
-"$SCRIPT_DIR/deploy.sh" --no-systemd
-"$SCRIPT_DIR/verify.sh"
-"$PODMAN_BIN" unshare rm -rf "$old"
-if [[ "$web_was_running" == false ]]; then compose stop web; fi
-trap - ERR
-if [[ "$rollback_mode" == false ]]; then
-  log "Restore completed. Pre-restore recovery archive retained: $pre_restore"
+# From here on every failure takes the full-archive rollback path above.
+mutation_started=1
+podman exec -i odoo18-db psql -X -q --set=ON_ERROR_STOP=1 --single-transaction -U odoo -d postgres <"$roles_prepared"
+if ((restore_secrets)); then
+  [[ -f $stage/secrets/postgres-password && -f $stage/secrets/admin-password ]] \
+    || ql_die "--restore-secrets needs an archive made with --include-secrets"
+  for s in postgres admin; do
+    podman secret create --replace --label "io.woowtech.app=$APP" "odoo18-$s-password" "$stage/secrets/$s-password" >/dev/null \
+      || ql_die "cannot replace secret odoo18-$s-password"
+  done
+  ql_info "replaced both password secrets from the archive"
+fi
+# The archived roles carry the password of the backup host; make the role match this host's secret.
+odoo_set_role_password || ql_die "could not set the database role password"
+
+mountpoint=$(podman volume inspect --format '{{.Mountpoint}}' odoo18-web-data)
+[[ $mountpoint == /* && $mountpoint != / ]] || ql_die "unexpected mountpoint for odoo18-web-data"
+for db in "${dbs[@]}"; do
+  [[ $db =~ ^[A-Za-z0-9_.-]+$ ]] || ql_die "refusing to restore a database with an unusual name: $db"
+  podman exec odoo18-db dropdb -U odoo --if-exists --force "$db"
+  podman exec odoo18-db createdb -U odoo -O odoo "$db"
+  podman exec -i odoo18-db pg_restore -U odoo --exit-on-error --single-transaction -d "$db" <"$stage/databases/$db.dump"
+  ql_info "restored database $db"
+  # Filestore for this database only; other databases keep theirs.
+  new=$mountpoint/.filestore.restore.$db.$$
+  old=$mountpoint/.filestore.previous.$db.$$
+  podman unshare mkdir -m 700 -p "$new"
+  if podman unshare test -d "$stage/volume/filestore/$db"; then
+    podman unshare cp -a "$stage/volume/filestore/$db/." "$new/"
+  fi
+  podman unshare chown -R 100:101 "$new"
+  podman unshare mkdir -m 700 -p "$mountpoint/filestore"
+  podman unshare chown 100:101 "$mountpoint/filestore"
+  if podman unshare test -e "$mountpoint/filestore/$db"; then podman unshare mv "$mountpoint/filestore/$db" "$old"; old_stores+=("$old"); fi
+  podman unshare mv "$new" "$mountpoint/filestore/$db"
+done
+if ((restore_secrets)); then odoo_render_conf_secret; fi
+
+systemctl --user restart odoo.service
+app_wait_healthy odoo18-web 300 odoo.service
+"$REPO/tests/smoke.sh" --quick
+for old in "${old_stores[@]}"; do podman unshare rm -rf -- "$old" >/dev/null 2>&1 || true; done
+if [[ $web_was_running == false && $rollback_mode == false ]]; then
+  ql_info "Odoo was stopped before the restore; it is running now so the restore could be verified"
+fi
+extra=$(comm -23 <(odoo_databases | LC_ALL=C sort) <(printf '%s\n' "${dbs[@]}" | grep -v '^$' | LC_ALL=C sort) || true)
+[[ -z $extra ]] || ql_warn "databases not in the archive were left untouched: ${extra//$'\n'/ }"
+if [[ $rollback_mode == false ]]; then
+  ql_info "restore complete; the pre-restore archive is kept: $pre_restore"
 else
-  log "Pre-restore state restored and verified."
+  ql_info "pre-restore state restored and verified"
 fi
