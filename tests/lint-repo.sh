@@ -27,7 +27,7 @@ for f in "${files[@]}"; do [[ -f $f ]] && grep -Iq . "$f" 2>/dev/null && text+=(
 # ---- 1. credentials ------------------------------------------------------------------------------
 # KEY=value lines whose key names a credential and whose value is a literal (not empty, not a
 # $VAR / @@TOKEN@@ / <placeholder> / *_FILE path).
-cred_re='(^|[^A-Za-z0-9_])[A-Z0-9_]*(PASSWORD|PASSWD|SECRET|TOKEN|_KEY)=[^[:space:]$@<"'\''`{}(]'
+cred_re='(^|[^A-Za-z0-9_])[A-Z0-9_]*(PASSWORD|PASSWD|SECRET|TOKEN|_KEY)=[^[:space:]$@<"'\''`{}(%]'
 # Obvious placeholders (dummy/example/placeholder/changeme/redacted values) are not credentials.
 hits=$(grep -nHE "$cred_re" "${text[@]}" 2>/dev/null \
   | grep -vE '(_FILE|_PATH)=' \
