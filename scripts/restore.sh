@@ -29,7 +29,7 @@ while (($#)); do
     --archive) (($# >= 2)) || ql_die "--archive needs a path"; archive=$2; shift ;;
     --confirm-restore) (($# >= 2)) || ql_die "--confirm-restore needs the word $APP"; confirm=$2; shift ;;
     --restore-secrets) restore_secrets=1 ;;
-    -h | --help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,14p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift

@@ -27,7 +27,7 @@ include_secrets=0
 while (($#)); do
   case $1 in
     --include-secrets) include_secrets=1 ;;
-    -h | --help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,14p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift

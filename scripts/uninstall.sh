@@ -26,7 +26,7 @@ while (($#)); do
     --yes) yes=1 ;;
     --confirm-purge) (($# >= 2)) || ql_die "--confirm-purge needs the word $APP"; [[ $2 == "$APP" ]] || ql_die "--confirm-purge needs the word $APP"; yes=1; shift ;;
     --dry-run) export QL_DRY_RUN=1 ;;
-    -h | --help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,13p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift

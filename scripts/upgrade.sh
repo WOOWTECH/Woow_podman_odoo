@@ -27,7 +27,7 @@ while (($#)); do
   case $1 in
     --update-modules) update_modules=1 ;;
     --no-backup) no_backup=1 ;;
-    -h | --help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,14p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift

@@ -26,7 +26,7 @@ while (($#)); do
   case $1 in
     --db) db=1 ;;
     --admin) admin=1 ;;
-    -h | --help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,13p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift
