@@ -35,7 +35,7 @@ while (($#)); do
     --no-start) no_start=1 ;;
     --no-smoke) no_smoke=1 ;;
     --dry-run) export QL_DRY_RUN=1 ;;
-    -h | --help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,17p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift
@@ -123,6 +123,11 @@ if ((no_start)); then
 fi
 ql_apply_units "$APP" odoo-db.service
 app_wait_healthy odoo18-db 180 odoo-db.service
+odoo_check_db_password || ql_die "the database role odoo does not accept the password in the
+odoo18-postgres-password secret. The volume odoo18-db-data already held a cluster, and
+POSTGRES_PASSWORD_FILE only applies to an empty volume, so the role still uses whatever password it
+was created with -- possibly the one this repository published before 2026-09. Point the role at the
+recorded secret with: scripts/rotate-secrets.sh --db"
 ql_apply_units "$APP" odoo.service
 app_wait_healthy odoo18-web 300 odoo.service
 host=$(app_local_host "$(ql_env_get WOOW_ODOO_BIND)")

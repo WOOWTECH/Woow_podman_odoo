@@ -65,6 +65,30 @@ odoo_databases() {
     "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate AND datname <> 'postgres' ORDER BY 1"
 }
 
+# odoo_check_db_password: the database role "odoo" must accept the password recorded in the
+# odoo18-postgres-password secret. POSTGRES_PASSWORD_FILE is read only when an EMPTY volume is
+# initialised, so a volume adopted from an older deployment keeps whatever password it was created
+# with -- including the value this public repository leaked before 2026-09. Without this check the
+# only symptom is Odoo timing out with an authentication error buried in its log. The password
+# travels through podman's own environment ("-e PGPASSWORD" with no value), never in argv.
+# Returns 1 when the password is refused; 0 when it works.
+odoo_check_db_password() {
+  local xt=0 rc=0
+  [[ $- == *x* ]] && xt=1 && set +x
+  PGPASSWORD=$(app_secret_read odoo18-postgres-password || true)
+  if [[ -z $PGPASSWORD ]]; then
+    unset PGPASSWORD
+    ((xt)) && set -x
+    ql_die "secret odoo18-postgres-password is missing; run scripts/install.sh again"
+  fi
+  export PGPASSWORD
+  podman exec -i -e PGPASSWORD odoo18-db \
+    psql -X -q -w -h 127.0.0.1 -U odoo -d postgres -Atc 'SELECT 1' >/dev/null 2>&1 || rc=$?
+  unset PGPASSWORD
+  ((xt)) && set -x
+  return "$rc"
+}
+
 # odoo_set_role_password: make the database role "odoo" use the current odoo18-postgres-password
 # secret. The statement travels on psql's stdin, never in argv.
 odoo_set_role_password() {

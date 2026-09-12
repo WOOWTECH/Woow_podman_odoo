@@ -224,6 +224,7 @@ docs/plans/                   設計歷史，包含本倉庫所承接的加固�
 |---|---|
 | `install.sh` 說 `odoo18.service` 正在執行 | compose 時代的部署仍在跑，請先完成遷移章節。 |
 | `install.sh` 說有容器存在且不受管理 | 用印出的指令改名，或備份後移除。 |
+| `install.sh` 說資料庫角色不接受記錄的密碼 | volume `odoo18-db-data` 先前已初始化，因此仍沿用當初的密碼（`POSTGRES_PASSWORD_FILE` 只在空 volume 上生效）。請執行 `scripts/rotate-secrets.sh --db`。 |
 | Odoo 啟動後因資料庫錯誤結束 | `journalctl --user -u odoo.service -n 100`。首次啟動時資料庫可能仍在初始化，Odoo 會重試，systemd 也會重啟它。 |
 | 資料庫管理介面出現 `Access Denied` | 請用 `odoo18-admin-password` secret，而不是 `admin`。 |
 | 看不到某個 addon | 對 addons 目錄執行 `chmod -R o+rX`，再重啟 `odoo.service` 並更新模組。 |

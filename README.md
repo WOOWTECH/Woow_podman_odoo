@@ -238,6 +238,7 @@ docs/plans/                   design history, including the hardened deployment 
 |---|---|
 | `install.sh` says `odoo18.service` is active | The compose-era deployment is still running. Follow the migration section. |
 | `install.sh` says a container exists and is not managed | Rename it with the printed command, or remove it after a backup. |
+| `install.sh` says the database role does not accept the recorded password | The volume `odoo18-db-data` was initialised earlier, so it kept its original password (`POSTGRES_PASSWORD_FILE` only applies to an empty volume). Run `scripts/rotate-secrets.sh --db`. |
 | Odoo starts, then exits with a database error | `journalctl --user -u odoo.service -n 100`. On the very first start the database may still be initialising; Odoo retries and systemd restarts it. |
 | `Access Denied` in the database manager | Use the `odoo18-admin-password` secret, not `admin`. |
 | An addon does not show up | `chmod -R o+rX` on the addons directory, then restart `odoo.service` and update the module. |
