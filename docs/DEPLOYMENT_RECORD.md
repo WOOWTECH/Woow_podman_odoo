@@ -1,152 +1,107 @@
-# Deployment Record | 部署記錄
+# Deployment acceptance record / 部署驗收紀錄
 
-## Successful Deployment Details | 成功部署詳情
+Evidence template for a Quadlet deployment of this repo. Record only observed results. Never record
+a password, a secret value, an archive's contents, or tunnel/tailnet authentication material — the
+commands below are written so that none of them prints one.
 
-**Date | 日期:** 2026-02-17
-**Status | 狀態:** SUCCESS | 成功
+本檔為 Quadlet 部署的證據範本。只填寫實際觀察到的結果；絕不可記錄密碼、secret 內容、備份內容或
+通道／tailnet 認證資料。下列指令均已避免輸出任何密碼。
 
----
+Copy this file to `docs/records/<host>-<date>.md` for an actual run; leave this one as the template.
+Mark anything you did not run as `NOT RUN — <reason>`. Do not fabricate results.
 
-## Deployment Summary | 部署摘要
+## Prerequisites / 前置需求
 
-### Components Deployed | 已部署組件
+| Item | Command | Result |
+|---|---|---|
+| Date (UTC) / 日期 | `date -u +%FT%TZ` | |
+| Operator / 操作者 | | |
+| Commit | `git rev-parse --short HEAD` | |
+| Host and OS / 主機與系統 | `hostnamectl \| sed -n '1p;/Operating System/p'` | |
+| Podman | `podman --version` (must be >= 4.9) | |
+| Quadlet generator | `/usr/libexec/podman/quadlet -version` | |
+| Rootless and linger | `id -u` (not 0) and `loginctl show-user $USER -p Linger` | |
+| Image digests / 映像 digest | `grep -h '^Image=' quadlet/*.container` | |
 
-| Component | Image | Version | Status |
-|-----------|-------|---------|--------|
-| Odoo | odoo:18 | 18 | Running |
-| PostgreSQL | postgres:16 + pgvector | 16.12 | Running |
-| pgvector | v0.7.4 | 0.7.4 | Available |
+## Static acceptance / 靜態驗收
 
-### Verification Results | 驗證結果
+| Check | Command | Result |
+|---|---|---|
+| Quadlet dry-run + `systemd-analyze verify` | `tests/dryrun.sh` | |
+| Repo lint (credentials, D1, READMEs, image pins) | `tests/lint-repo.sh` | |
+| Leaked-value scan / 外洩值掃描 | `python3 tests/leaked-value-scan.py` | |
+| Vendored library unmodified | `sha256sum -c scripts/lib/quadlet-lib.manifest` | |
+| Shell lint | `shellcheck -x scripts/*.sh scripts/lib/*.sh tests/*.sh` | |
+| Python tests | `python3 -m pytest tests/ -q` (or `tests/run.sh`) | |
 
-```
-# Container Status
-odoo18-db   Up
-odoo18-web  Up      0.0.0.0:18069->8069/tcp
+## Install / 安裝
 
-# HTTP Test
-HTTP/1.1 303 SEE OTHER
-Server: Werkzeug/3.0.1 Python/3.12.3
-Location: /odoo
+| Step | Command | Result |
+|---|---|---|
+| Dry run / 試跑 | `scripts/install.sh --dry-run` | |
+| First install / 首次安裝 | `scripts/install.sh` | |
+| Idempotence / 冪等性 | `scripts/install.sh` again — must report no restart | |
+| Port override (isolated test) / 埠覆寫 | `scripts/install.sh --set WOOW_ODOO_PORT=<port>` | |
+| Units / 單元 | `systemctl --user list-units 'odoo*'` | |
+| Loopback only / 僅限 loopback | `ss -ltnp \| grep <port>` — must show `127.0.0.1`, and the database no port at all | |
+| Database password accepted / 資料庫密碼 | install.sh runs `odoo_check_db_password`; an adopted volume that fails needs `scripts/rotate-secrets.sh --db` | |
 
-# pgvector Extension
-name   | default_version | installed_version
-vector | 0.7.4           |
-```
+## Verify / 驗證
 
----
+| Check | Command | Result |
+|---|---|---|
+| Smoke | `tests/smoke.sh` | |
+| HTTP | `curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<port>/web/health` | |
+| Secrets exist (names only) / secret 名稱 | `podman secret ls --format '{{.Name}}'` | |
+| No plaintext credential on disk | `grep -rIl 'admin_passwd' ~/.config/odoo18/ ; echo rc=$?` | |
 
-## Files Created | 建立的檔案
+## Reboot and linger / 重開機與 linger
 
-```
-.
-├── docker-compose.yml      (1061 bytes) - Main orchestration
-├── .env                    (187 bytes)  - Environment config
-├── .env.example            (236 bytes)  - Example config
-├── .gitignore              (199 bytes)  - Git ignore rules
-├── postgres/
-│   └── Dockerfile          - PostgreSQL 16 + pgvector
-├── addons/
-│   └── .gitkeep            - Custom modules placeholder
-├── config/
-│   └── odoo.conf           - Odoo configuration
-├── docs/
-│   ├── plans/
-│   │   └── 2026-02-17-odoo18-docker-compose-design.md
-│   └── DEPLOYMENT_RECORD.md (this file)
-└── README.md               - Bilingual documentation
-```
+| Check | Command | Result |
+|---|---|---|
+| Survives logout / 登出後仍執行 | `loginctl terminate-user $USER`, then re-check the units | |
+| Survives reboot / 重開機後自動啟動 | reboot, then `systemctl --user is-active odoo.service` | |
 
----
+## Backup and restore / 備份與還原
 
-## Docker Volumes Created | 建立的 Docker Volumes
+| Step | Command | Result |
+|---|---|---|
+| Backup | `scripts/backup.sh` | |
+| Archive permissions / 備份權限 | `stat -c '%a %n' <archive>/*` — files 0600, directory 0700 | |
+| Archive validation | `python3 tests/validate-backup.py <archive>` | |
+| Restore drill / 還原演練 | `scripts/restore.sh --archive <archive> --confirm-restore odoo18` | |
+| Post-restore verification / 還原後驗證 | `tests/smoke.sh` | |
 
-| Volume Name | Purpose | Mount Point |
-|-------------|---------|-------------|
-| odoo18-db-data | PostgreSQL data | /var/lib/postgresql/data |
-| odoo18-web-data | Odoo filestore | /var/lib/odoo |
+## Upgrade / 升級
 
----
+| Step | Command | Result |
+|---|---|---|
+| Upgrade | `git pull && scripts/upgrade.sh` | |
+| Rollback exercised? / 是否演練回滾 | | |
 
-## Network Configuration | 網路配置
+## Rotation / 輪替
 
-| Network | Driver | Purpose |
-|---------|--------|---------|
-| odoo18-network | bridge | Internal communication |
+| Step | Command | Result |
+|---|---|---|
+| Database role password | `scripts/rotate-secrets.sh --db` | |
+| Master password | `scripts/rotate-secrets.sh --admin` | |
 
----
+## Removal / 移除
 
-## Environment Variables Used | 使用的環境變數
+| Step | Command | Result |
+|---|---|---|
+| Default removal keeps data / 一般移除保留資料 | `scripts/uninstall.sh`, then `podman volume ls` | |
+| Purge (only if deliberately tested) / 清除 | `scripts/uninstall.sh --purge` | |
 
-```bash
-POSTGRES_USER=odoo
-POSTGRES_PASSWORD=odoo18_secure_pass_2026
-POSTGRES_DB=postgres
-ODOO_PORT=18069
-```
+## Security boundary / 安全邊界
 
----
+| Invariant | Result |
+|---|---|
+| Odoo published on 127.0.0.1 only / Odoo 僅在 loopback | |
+| Database publishes no host port / 資料庫不對外開埠 | |
+| No plaintext credential in the repo or in any unit / 倉庫與單元無明文憑證 | |
+| Master password is the generated secret, not `admin` / master 密碼為產生值 | |
+| The previously leaked database password has been rotated on this host / 已輪替外洩的資料庫密碼 | |
 
-## Commands to Reproduce | 重現部署的指令
+## Observations / 觀察
 
-### Start Services | 啟動服務
-
-```bash
-# Using Docker Compose
-docker compose up -d
-
-# Using Podman Compose
-podman-compose up -d
-```
-
-### Verify Deployment | 驗證部署
-
-```bash
-# Check containers
-docker compose ps   # or podman ps
-
-# Test HTTP
-curl -I http://localhost:18069
-
-# Check pgvector
-docker exec odoo18-db psql -U odoo -d postgres -c "SELECT * FROM pg_available_extensions WHERE name = 'vector';"
-```
-
-### Enable pgvector in Database | 在資料庫啟用 pgvector
-
-```bash
-docker exec odoo18-db psql -U odoo -d your_database_name -c "CREATE EXTENSION IF NOT EXISTS vector;"
-```
-
----
-
-## Access Information | 存取資訊
-
-| Service | URL | Default Credentials |
-|---------|-----|---------------------|
-| Odoo Web | http://localhost:18069 | Create on first access |
-| Database Manager | http://localhost:18069/web/database/manager | Master: admin |
-
----
-
-## For AI Redeployment | AI 重新部署指南
-
-### Quick Redeploy
-
-1. Verify all files exist in the directory
-2. Ensure `.env` has correct `POSTGRES_PASSWORD`
-3. Run: `docker compose up -d` or `podman-compose up -d`
-4. Verify: `curl -I http://localhost:18069` should return 303 redirect
-
-### If Starting Fresh
-
-1. Copy `.env.example` to `.env`
-2. Set secure password in `.env`
-3. Run: `docker compose up -d`
-4. Wait 30-60 seconds for PostgreSQL initialization
-5. Access: http://localhost:18069
-
----
-
-**Recorded by:** Claude AI
-**Last Updated:** 2026-02-17

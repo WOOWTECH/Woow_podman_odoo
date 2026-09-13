@@ -1,0 +1,5 @@
+# Variables scripts/install.sh may substitute into the units (@@NAME@@).
+# Computed by scripts/render-args.sh from WOOW_ODOO_BIND and WOOW_ODOO_PORT:
+ODOO_PUBLISH
+# Taken from ~/.config/odoo18/odoo18.env (validated by scripts/render-args.sh):
+WOOW_ODOO_ADDONS_DIR

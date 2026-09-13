@@ -1,0 +1,4 @@
+# Variables scripts/install.sh substitutes into config/odoo.conf.template (@@NAME@@).
+POSTGRES_PASSWORD
+ODOO_ADMIN_PASSWORD
+WOOW_ODOO_LIST_DB
