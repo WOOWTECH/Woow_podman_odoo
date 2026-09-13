@@ -41,7 +41,12 @@ hits=$(grep -nHE "$known" "${text[@]}" 2>/dev/null || true)
 if [[ -n $hits ]]; then fail "default passwords or token-shaped strings at:"; where <<<"$hits"; else ok "no default passwords or token-shaped strings"; fi
 
 # ---- 2. D1: compose files are gone ---------------------------------------------------------------
-left=$(printf '%s\n' "${files[@]}" | grep -E '(^|/)(docker|podman)-compose[^/]*\.ya?ml$|^compose/|^\.env\.example$' || true)
+# D1 is about the live deployment path. archive/pre-quadlet-deployment/ is the compose-era tree
+# preserved from the openclaw host: it is never installed, sourced, executed or rendered, and its
+# README says so on the first line. Only this check is narrowed - the credential scan above and the
+# leaked-value gate below still cover the archive.
+left=$(printf '%s\n' "${files[@]}" | grep -v '^archive/pre-quadlet-deployment/' \
+  | grep -E '(^|/)(docker|podman)-compose[^/]*\.ya?ml$|^compose/|^\.env\.example$' || true)
 if [[ -n $left ]]; then fail "compose deployment files remain (D1):"; while IFS= read -r l; do printf "     %s\n" "$l"; done <<<"$left"; else ok "no compose files (D1)"; fi
 
 # ---- 3. READMEs --------------------------------------------------------------------------------

@@ -1,0 +1,65 @@
+version: "3.8"
+name: odoo18
+
+services:
+  db:
+    image: docker.io/pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9
+    container_name: odoo18-db
+    environment:
+      POSTGRES_USER: odoo
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - odoo-db-data:/var/lib/postgresql/data
+      - ./.runtime/secrets/postgres_password:/run/secrets/postgres_password:Z,ro
+    networks: [odoo-network]
+    labels:
+      io.woowtech.stack: odoo18
+      io.woowtech.owner: "${ODOO_DEPLOY_UID:?set by scripts/deploy.sh}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U odoo -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    restart: unless-stopped
+
+  web:
+    image: docker.io/library/odoo:18.0@sha256:259fa933bf3ee7f3e375bd74d1e0bc28bd75955159723be477359e0fdb8acf67
+    container_name: odoo18-web
+    depends_on: [db]
+    ports: ["127.0.0.1:18069:8069"]
+    volumes:
+      - odoo-web-data:/var/lib/odoo
+      - ./addons:/mnt/extra-addons:Z,ro
+      - ./.runtime/config/odoo.conf:/etc/odoo/odoo.conf:Z,ro
+      - ./scripts/odoo-healthcheck.py:/usr/local/bin/odoo-healthcheck:Z,ro
+    networks: [odoo-network]
+    labels:
+      io.woowtech.stack: odoo18
+      io.woowtech.owner: "${ODOO_DEPLOY_UID:?set by scripts/deploy.sh}"
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/local/bin/odoo-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  odoo-db-data:
+    name: odoo18-db-data
+    labels:
+      io.woowtech.stack: odoo18
+      io.woowtech.owner: "${ODOO_DEPLOY_UID:?set by scripts/deploy.sh}"
+  odoo-web-data:
+    name: odoo18-web-data
+    labels:
+      io.woowtech.stack: odoo18
+      io.woowtech.owner: "${ODOO_DEPLOY_UID:?set by scripts/deploy.sh}"
+
+networks:
+  odoo-network:
+    name: odoo18-network
+    driver: bridge
+    labels:
+      io.woowtech.stack: odoo18
+      io.woowtech.owner: "${ODOO_DEPLOY_UID:?set by scripts/deploy.sh}"
