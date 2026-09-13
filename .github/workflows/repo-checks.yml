@@ -21,3 +21,6 @@ jobs:
 
       - name: Backup validator and roles preparer tests
         run: tests/run.sh
+
+      - name: Migration model tests (podman and systemctl are shims; no container is created)
+        run: tests/migrate-model.sh

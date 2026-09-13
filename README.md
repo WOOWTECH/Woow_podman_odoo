@@ -185,34 +185,108 @@ scripts/uninstall.sh --purge --confirm-purge odoo18      # also delete both volu
 `--purge` is the only command that deletes data, and it takes a final cold backup of both volumes plus
 the env file first. Images, backups and your addons directory are never deleted.
 
-## Migrating an existing deployment
+## Migrating an existing compose deployment
 
-The container, volume and network names are the same as the compose deployment's, so this is an
-in-place adoption: nothing is copied and the images do not change.
+`scripts/migrate-legacy.sh` moves a running podman-compose / docker-compose deployment of the
+`odoo18` project (containers `odoo18-db` and `odoo18-web`, volumes `odoo18-db-data` and
+`odoo18-web-data`, network `odoo18-network`, optionally the hand-written `odoo18.service` and
+`odoo18-health.timer`) onto the Quadlet units of this repo.
 
-1. **Back up with the old tooling** (`scripts/backup.sh` of the compose checkout), and save
-   `podman inspect odoo18-db odoo18-web > legacy-inspect.json`.
-2. **Import the existing passwords** so the generated ones do not replace them. Pipe them in; never
-   echo them. Strip the trailing newline, because the PostgreSQL entrypoint did too:
-   ```bash
-   podman unshare cat .runtime/secrets/postgres_password | tr -d '\n' | podman secret create odoo18-postgres-password -
-   tr -d '\n' < .runtime/secrets/odoo_admin_password | podman secret create odoo18-admin-password -
-   ```
-3. **Stop the old supervision:** `systemctl --user disable --now odoo18-health.timer odoo18.service`
-   (that also runs `compose stop`). `install.sh` refuses to run while either is active.
-4. **Rename the legacy containers** so Quadlet cannot replace them:
-   `podman rename odoo18-db odoo18-db-legacy-$(date +%Y%m%d)` and the same for `odoo18-web`. Their
-   restart policy is `unless-stopped`, so `podman-restart.service` will not start them again.
-5. **Point the addons setting at your existing directory** and install:
-   ```bash
-   scripts/install.sh --set WOOW_ODOO_ADDONS_DIR=%h/Woow_podman_odoo/addons
-   tests/smoke.sh
-   ```
-6. **Roll back** by stopping the Quadlet units, renaming the legacy containers back and re-enabling
-   `odoo18.service`. Both paths use the same volumes.
-7. **After a soak period,** remove the legacy containers, the three hand-written `odoo18*` units and
-   the old `.runtime/` directory (`shred` its secrets; they now live in podman's secret store). This
-   also retires the health timer that fired every 10 seconds.
+It is an **in-place adoption**: the units keep the compose names (`ContainerName=`, `VolumeName=`,
+`NetworkName=`), so the same volumes and the same network are opened again. No database is copied,
+no filestore is moved and the pinned images do not change. The legacy containers are kept for
+`--rollback`.
+
+```bash
+scripts/migrate-legacy.sh --dry-run                 # checks + render, changes nothing
+scripts/migrate-legacy.sh --prepare-only            # + secrets, images, hot backup; no downtime
+scripts/migrate-legacy.sh                           # the cutover
+scripts/migrate-legacy.sh --status                  # what was recorded
+scripts/migrate-legacy.sh --rollback                # back to the legacy stack
+```
+
+Useful options: `--legacy-dir DIR` archives the old checkout's `.env` and compose file into the
+backup; `--suffix S` names the kept containers `<name>-legacy-S`; `--no-cold-copy` skips the cold
+`podman volume export` when the filestore is large and a separate backup exists;
+`--new-master-password` generates a fresh Odoo master password instead of adopting the legacy one;
+`--force-capture` takes the capture path on a host that would allow a rename; `--fix-addon-perms`
+is passed through to `install.sh`.
+
+**What it reads from where.** Everything the migration needs is taken from the *running containers*,
+not from the checkout, because the deployed tree is not always the tree this repo describes — on
+`woowtechopenclaw` the `.env` contains no settings at all. The publish address comes from
+`odoo18-web`'s `8069/tcp` binding, the addons directory and both volume names from its mounts, and
+`list_db` plus the master password from the `odoo.conf` the container actually reads.
+
+**The database password is the one thing that cannot be regenerated.** `POSTGRES_PASSWORD` and
+`POSTGRES_PASSWORD_FILE` are only read when an *empty* volume is initialised, so the role `odoo`
+inside the adopted `odoo18-db-data` keeps whatever password it was created with. The script reads
+that password from the running container (either form) and **proves it** by authenticating over TCP
+— which is how the new `odoo.conf` connects — before any downtime starts. It then writes it into
+the `odoo18-postgres-password` secret. A password that does not authenticate is a refusal, not a
+warning.
+
+**The master password.** A generated legacy `admin_passwd` is adopted into the
+`odoo18-admin-password` secret. A missing or well-known one (`admin`, which is what this repo's own
+`compose-final` tag shipped) is **not**: `install.sh` generates a fresh one instead, and
+`tests/smoke.sh` asserts that `admin` is rejected. Read the new value with
+`podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-password`.
+
+**No database is a normal case.** A stack that has never had a tenant database created — only
+`postgres` and the templates, which is exactly `woowtechopenclaw` today — migrates normally. The
+roles dump is still taken (it carries the password the adopted volume was initialised with) and the
+database count is recorded so the post-migration comparison is explicit.
+
+**What it refuses rather than guesses.** A legacy container that is missing or not running; one that
+is already managed by these units; Quadlet units that are already installed; a volume or network
+whose name differs from what the units pin (adopting would silently start on an empty database); an
+unreadable addons directory; another container publishing the same host port; a host port still
+bound after the legacy stack stopped; an Odoo or PostgreSQL major version that differs from the pins;
+a database password the role does not accept; and a second run after a recorded cutover.
+
+**How the legacy containers are kept** (STANDARD 7a). Either renamed to `<name>-legacy-<suffix>` and
+left stopped, or — where the user unit `podman-restart.service` is enabled *and* a legacy container's
+restart policy is exactly `always`, because `podman start --all --filter restart-policy=always` would
+then revive it at the next boot and a second PostgreSQL would open `odoo18-db-data` — captured into
+the backup directory and removed. `ql_rollback_strategy` decides from the host's real state, never
+from its name, and `--dry-run` reports which path a cutover would take. The capture is taken in the
+prepare phase, before any downtime, so a container that cannot be replayed is discovered while the
+legacy stack is still serving. `odoo18-db` and `odoo18-web` are `unless-stopped` today, so both
+hosts currently resolve to `rename`; `--force-capture` exercises the other path.
+
+**What the backup holds** (`~/.local/share/woow-backups/odoo18/migrate-<stamp>/`, 0700):
+`roles.sql`, `databases/<db>.dump` plus `COUNT` and `LIST`, a cold `podman volume export` of both
+volumes, `inspect.json`, the legacy `odoo.conf` and unit files, `volume-fingerprints`,
+`precheck.txt` and `SHA256SUMS` — and `legacy-container/` on the capture path.
+
+**Adoption is proved, not assumed.** The `CreatedAt` and the on-disk inode of both volumes are
+recorded before the cutover and compared after `install.sh`. If the new containers are not on the
+legacy volumes the migration fails and rolls back, rather than reporting a healthy Odoo sitting on
+an empty database.
+
+**Downtime** is measured by the script, from stopping the legacy stack to `install.sh` returning,
+and printed at the end (and recorded as `DOWNTIME_S` in `--status`).
+
+### Rolling back
+
+```bash
+scripts/migrate-legacy.sh --rollback
+```
+
+It stops and removes the Quadlet units (volumes, network and secrets are kept, because both stacks
+share them), removes any container this repo's units left behind, brings the legacy containers back
+— renamed back, or recreated from the capture with their original restart policy — re-enables the
+legacy units it disabled, starts the database before the web container, and waits for
+`/web/health` on the legacy address. A failed cutover rolls itself back automatically unless
+`--no-auto-rollback` was given.
+
+### After the soak
+
+Once the Quadlet stack has run long enough, remove the legacy containers
+(`podman rm odoo18-db-legacy-<suffix> odoo18-web-legacy-<suffix>`), the hand-written `odoo18.service`,
+`odoo18-health.service` and `odoo18-health.timer` (that also retires the health check that fired
+every 10 seconds), and the old `.runtime/` directory — `shred` its secret files; the passwords now
+live in podman's secret store. Keep the migration backup until you are sure.
 
 ## Files
 
@@ -224,9 +298,14 @@ scripts/install.sh            install/update; also the "apply my changes" comman
 scripts/upgrade.sh            backup, unit snapshot, install, pgvector update, smoke, rollback
 scripts/backup.sh restore.sh  validated archives; scripts/validate-backup.py, make-roles-idempotent.py
 scripts/rotate-secrets.sh     rotate the database and master passwords
+scripts/migrate-legacy.sh     adopt a running compose deployment; --rollback, --status
+scripts/legacy-helpers.sh     the helpers migrate-legacy.sh uses (kept out of common.sh, which is
+                              byte-identical across four repos below its settings block)
 scripts/lib/                  vendored quadlet-lib (do not edit; CI checks its hash)
 tests/dryrun.sh               render + Quadlet 4.9.3 dry-run + systemd-analyze verify (CI and local)
 tests/run.sh                  Python unit tests for the validator, the roles preparer and the template
+tests/migrate-model.sh        pins the migration: both rollback strategies, the dependency order, the
+                              empty-database case, the adoption proof (podman/systemctl are shims)
 tests/smoke.sh                post-install checks on a host
 tests/lint-repo.sh            credential scan, leaked-value gate, image-pin parity, README checks (CI)
 docs/plans/                   design history, including the hardened deployment this repo grew from
