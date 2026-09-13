@@ -173,32 +173,96 @@ scripts/uninstall.sh --purge --confirm-purge odoo18      # 另外刪除兩個 vo
 `--purge` 是唯一會刪除資料的指令，而且會先對兩個 volume 與 env 檔做最後一次冷備份。映像、備份與你的
 addons 目錄一律不刪除。
 
-## 從既有部署遷移
+## 從既有 compose 部署遷移
 
-容器、volume 與網路名稱都與 compose 部署相同，因此是原地沿用：不需複製資料，映像也不變。
+`scripts/migrate-legacy.sh` 會把執行中的 podman-compose／docker-compose `odoo18` 專案（容器
+`odoo18-db`、`odoo18-web`，volume `odoo18-db-data`、`odoo18-web-data`，網路 `odoo18-network`，以及
+可能存在的手寫 `odoo18.service` 與 `odoo18-health.timer`）搬到本倉庫的 Quadlet 單元。
 
-1. **先用舊工具備份**（compose checkout 的 `scripts/backup.sh`），並保存
-   `podman inspect odoo18-db odoo18-web > legacy-inspect.json`。
-2. **匯入既有密碼**，避免被新產生的取代。一律用管線，不要 echo；並去掉結尾換行（PostgreSQL entrypoint
-   也是這樣處理的）：
-   ```bash
-   podman unshare cat .runtime/secrets/postgres_password | tr -d '\n' | podman secret create odoo18-postgres-password -
-   tr -d '\n' < .runtime/secrets/odoo_admin_password | podman secret create odoo18-admin-password -
-   ```
-3. **停止舊的監管單元：** `systemctl --user disable --now odoo18-health.timer odoo18.service`
-   （這也會執行 `compose stop`）。只要其中之一還在執行，`install.sh` 就會拒絕繼續。
-4. **把舊容器改名**，避免被 Quadlet 取代：
-   `podman rename odoo18-db odoo18-db-legacy-$(date +%Y%m%d)`，`odoo18-web` 亦同。它們的重啟策略是
-   `unless-stopped`，所以 `podman-restart.service` 不會再啟動它們。
-5. **把 addons 設定指向既有目錄**後安裝：
-   ```bash
-   scripts/install.sh --set WOOW_ODOO_ADDONS_DIR=%h/Woow_podman_odoo/addons
-   tests/smoke.sh
-   ```
-6. **需要回復時**：停止 Quadlet 單元、把舊容器改回原名，再重新啟用 `odoo18.service`。兩條路徑使用同樣的
-   volume。
-7. **觀察期結束後**：移除舊容器、三個手寫的 `odoo18*` 單元與舊的 `.runtime/` 目錄（其中的 secret 請用
-   `shred`，它們現在存放在 podman secret store）。這也會一併淘汰每 10 秒觸發一次的健康檢查計時器。
+這是**原地沿用**：單元保留 compose 的名稱（`ContainerName=`、`VolumeName=`、`NetworkName=`），所以
+同樣的 volume 與網路會被再次開啟。資料庫不搬、filestore 不搬、釘版映像也不變。舊容器會保留給
+`--rollback`。
+
+```bash
+scripts/migrate-legacy.sh --dry-run                 # 只做檢查與產生單元，不改任何東西
+scripts/migrate-legacy.sh --prepare-only            # 再加上 secrets、映像、熱備份；不停機
+scripts/migrate-legacy.sh                           # 正式切換
+scripts/migrate-legacy.sh --status                  # 顯示記錄下來的狀態
+scripts/migrate-legacy.sh --rollback                # 回到舊的 compose 堆疊
+```
+
+常用選項：`--legacy-dir DIR` 把舊 checkout 的 `.env` 與 compose 檔一併封存進備份；`--suffix S` 指定
+保留容器的名字 `<name>-legacy-S`；filestore 很大且已有其他備份時可用 `--no-cold-copy` 略過冷
+`podman volume export`；`--new-master-password` 不沿用舊的 Odoo 主控密碼而是重新產生；
+`--force-capture` 讓本來可以改名的主機改走 capture 路徑；`--fix-addon-perms` 會轉交給 `install.sh`。
+
+**資料從哪裡讀。** 遷移需要的每個值都取自**執行中的容器**，而不是 checkout：實際部署的目錄未必是本倉庫
+描述的那一份——在 `woowtechopenclaw` 上，`.env` 裡根本沒有任何設定。發布位址取自 `odoo18-web` 的
+`8069/tcp` 綁定，addons 目錄與兩個 volume 名稱取自它的掛載，`list_db` 與主控密碼取自容器真正讀取的
+`odoo.conf`。
+
+**唯一無法重新產生的是資料庫密碼。** `POSTGRES_PASSWORD` 與 `POSTGRES_PASSWORD_FILE` 只有在初始化
+**空的** volume 時才會被讀取，所以被沿用的 `odoo18-db-data` 裡的 `odoo` 角色仍然使用當初建立時的密碼。
+腳本會從執行中的容器讀出該密碼（兩種形式都支援），並在任何停機開始前，用 TCP 連線**實際驗證**它能通過
+認證——這正是新的 `odoo.conf` 的連線方式——再寫入 `odoo18-postgres-password` secret。驗證不過就直接
+拒絕，不會只給一則警告。
+
+**主控密碼。** 舊 `odoo.conf` 若是自動產生的 `admin_passwd`，會被沿用到 `odoo18-admin-password`
+secret；若缺漏或是眾所周知的預設值（本倉庫 `compose-final` 標籤出貨的就是 `admin`），則**不會**沿用，
+改由 `install.sh` 重新產生——`tests/smoke.sh` 會斷言 `admin` 必須被拒絕。新值可用
+`podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-password` 讀出。
+
+**沒有任何資料庫是正常狀態。** 從未建立過租戶資料庫、只有 `postgres` 與樣板資料庫的堆疊（也就是
+`woowtechopenclaw` 目前的樣子）可以正常遷移。角色 dump 仍然會做（那裡面才有被沿用 volume 當初的密碼），
+資料庫數量也會記錄下來，好讓遷移後的比對有明確依據。
+
+**它拒絕而不猜測的情況。** 舊容器不存在或沒在執行；舊容器已由本單元管理；Quadlet 單元已經安裝；volume
+或網路名稱與單元釘住的不同（沿用會安靜地開在空資料庫上）；addons 目錄不可讀；有別的容器佔用同一個主機
+連接埠；舊堆疊停止後連接埠仍被綁住；Odoo 或 PostgreSQL 主版本與釘版不同；資料庫角色不接受該密碼；以及
+已經記錄過切換後再跑第二次。
+
+**舊容器如何保留**（STANDARD 7a）。要嘛改名為 `<name>-legacy-<suffix>` 並保持停止，要嘛——當使用者單元
+`podman-restart.service` 已啟用**且**某個舊容器的重啟策略剛好是 `always` 時，因為
+`podman start --all --filter restart-policy=always` 會在下次開機把它叫醒，讓第二個 PostgreSQL 開啟
+`odoo18-db-data`——就先 capture 進備份目錄再移除。`ql_rollback_strategy` 依主機的真實狀態判斷，絕不看
+主機名稱，`--dry-run` 也會報告將走哪一條路。capture 在準備階段完成，也就是停機之前。`odoo18-db` 與
+`odoo18-web` 目前都是 `unless-stopped`，所以兩台主機現在都判定為 `rename`；`--force-capture` 用來演練
+另一條路徑。
+
+**備份內容**（`~/.local/share/woow-backups/odoo18/migrate-<時間戳>/`，0700）：`roles.sql`、
+`databases/<db>.dump` 與 `COUNT`、`LIST`，兩個 volume 的冷 `podman volume export`、`inspect.json`、
+舊的 `odoo.conf` 與單元檔、`volume-fingerprints`、`precheck.txt` 與 `SHA256SUMS`；走 capture 路徑時
+另有 `legacy-container/`。
+
+**沿用會被證明，而不是假設。** 兩個 volume 的 `CreatedAt` 與磁碟 inode 會在切換前記錄、在 `install.sh`
+之後比對。若新容器並非開在舊 volume 上，遷移會失敗並自動回復，而不是報告一個健康但坐在空資料庫上的
+Odoo。
+
+**停機時間**由腳本自行量測（從停止舊堆疊到 `install.sh` 返回），結束時印出，並記錄成 `--status` 裡的
+`DOWNTIME_S`。
+
+### 回復
+
+```bash
+scripts/migrate-legacy.sh --rollback
+```
+
+它會停止並移除 Quadlet 單元（volume、網路與 secrets 都保留，因為兩邊共用），移除本倉庫單元留下的容器，
+把舊容器帶回來——改名回去，或是從 capture 以原本的重啟策略重建——重新啟用先前停用的舊單元，先啟動資料庫
+再啟動 web，然後等待舊位址的 `/web/health`。切換失敗時會自動回復，除非指定了 `--no-auto-rollback`。
+
+### 觀察期結束後
+
+Quadlet 堆疊穩定執行一段時間之後，移除舊容器——**先移除 web**，因為 `odoo18-web` 帶著
+`--requires=odoo18-db`，podman 會拒絕移除被別人依賴的容器：
+
+```bash
+podman rm odoo18-web-legacy-<suffix> odoo18-db-legacy-<suffix>
+```
+
+接著移除手寫的 `odoo18.service`、`odoo18-health.service` 與 `odoo18-health.timer`（這也一併淘汰每 10
+秒觸發一次的健康檢查），以及舊的 `.runtime/` 目錄——其中的 secret 檔請用 `shred`，密碼現在存放在 podman
+secret store。遷移備份請保留到確認無虞為止。
 
 ## 檔案
 
@@ -210,9 +274,14 @@ scripts/install.sh            安裝／更新，也是「套用我的變更」�
 scripts/upgrade.sh            備份、單元快照、安裝、pgvector 更新、smoke、失敗回復
 scripts/backup.sh restore.sh  經驗證的封存檔；另有 validate-backup.py、make-roles-idempotent.py
 scripts/rotate-secrets.sh     輪替資料庫與主控密碼
+scripts/migrate-legacy.sh     沿用執行中的 compose 部署；含 --rollback、--status
+scripts/legacy-helpers.sh     migrate-legacy.sh 專用的輔助函式（刻意不放進 common.sh，後者在四個
+                              倉庫之間的設定區塊以下是逐位元組相同的）
 scripts/lib/                  內嵌的 quadlet-lib（請勿修改；CI 會檢查其雜湊）
 tests/dryrun.sh               產生單元 + Quadlet 4.9.3 dry-run + systemd-analyze verify（CI 與本機）
 tests/run.sh                  驗證器、角色前處理與樣板的 Python 單元測試
+tests/migrate-model.sh        釘住遷移行為：兩條回復路徑、依賴順序、無資料庫的情況、沿用證明
+                              （podman 與 systemctl 皆為測試替身）
 tests/smoke.sh                主機上的安裝後檢查
 tests/lint-repo.sh            憑證掃描、外洩值閘門、映像釘版一致性、README 檢查（CI）
 docs/plans/                   設計歷史，包含本倉庫所承接的加固版部署
