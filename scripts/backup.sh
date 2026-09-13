@@ -33,8 +33,7 @@ while (($#)); do
   shift
 done
 ql_require_rootless
-app_lock
-
+ql_lock "$APP"
 [[ $(podman inspect --format '{{.State.Health.Status}}' odoo18-db 2>/dev/null) == healthy ]] \
   || ql_die "odoo18-db is not healthy; refusing to back up"
 web_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-web 2>/dev/null || echo false)
@@ -44,14 +43,16 @@ staging=$(mktemp -d "$BACKUP_ROOT/.backup.XXXXXX")
 web_restored=0
 cleanup() {
   local status=$?
-  trap - EXIT
   podman unshare rm -rf -- "$staging" >/dev/null 2>&1 || true
   if [[ $web_was_running == true && $web_restored == 0 ]]; then
     systemctl --user start odoo.service >/dev/null 2>&1 || ql_warn "could not start odoo.service again"
   fi
-  exit "$status"
+  return "$status"
 }
-trap cleanup EXIT
+# a hook, not `trap ... EXIT`, which would replace the handler ql_lock armed. It runs once,
+# so it does not have to disarm itself, and it returns instead of exiting: an exit here would
+# skip the lock release that runs after the hooks.
+ql_cleanup cleanup cleanup
 
 # Quiesce Odoo for the whole capture. The database stays up for the dumps.
 systemctl --user stop odoo.service

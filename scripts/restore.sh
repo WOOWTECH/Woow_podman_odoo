@@ -38,7 +38,7 @@ done
 archive=$(realpath -- "$archive")
 [[ -f $archive ]] || ql_die "archive not found: $archive"
 ql_require_rootless
-app_lock
+ql_lock "$APP"
 rollback_mode=${ODOO_RESTORE_ROLLBACK:-false}
 
 stage_parent=$(mktemp -d "$BACKUP_ROOT/.restore.XXXXXX")
@@ -48,7 +48,6 @@ old_stores=()
 # exits) must roll the pre-restore archive back before Odoo is allowed to serve again.
 cleanup() {
   local status=$?
-  trap - EXIT
   set +e
   if ((status != 0)); then
     systemctl --user stop odoo.service >/dev/null 2>&1
@@ -66,9 +65,12 @@ cleanup() {
     fi
   fi
   podman unshare rm -rf -- "$stage_parent" >/dev/null 2>&1 || true
-  exit "$status"
+  return "$status"
 }
-trap cleanup EXIT
+# a hook, not `trap ... EXIT`, which would replace the handler ql_lock armed. It runs once,
+# so it does not have to disarm itself, and it returns instead of exiting: an exit here would
+# skip the lock release that runs after the hooks.
+ql_cleanup cleanup cleanup
 
 # Freeze the caller's pathname into a private file, then validate and extract from that one file.
 staged=$stage_parent/source.tar

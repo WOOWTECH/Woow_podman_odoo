@@ -116,8 +116,7 @@ if [[ $mode == status ]]; then
 fi
 
 ql_preflight "$PODMAN_MIN"
-app_lock
-
+ql_lock "$APP"
 legacy_url() { printf 'http://%s:%s' "$(app_local_host "$(state_get LEGACY_BIND)")" "$(state_get LEGACY_PORT)"; }
 
 # =================================================================================================
@@ -378,7 +377,7 @@ app_render() {
 }
 QL_QUADLET_DIR_REF=${QL_QUADLET_DIR:-$HOME/.config/containers/systemd}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/$APP-migrate.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+ql_cleanup work rm -rf "$WORK"
 
 if [[ $mode == dry-run ]]; then
   if [[ -f $ENV_FILE ]]; then cp -p -- "$ENV_FILE" "$WORK/$APP.env"; else install -m 600 -- "$ENV_EXAMPLE" "$WORK/$APP.env"; fi
