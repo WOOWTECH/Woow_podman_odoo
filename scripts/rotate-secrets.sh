@@ -33,7 +33,7 @@ while (($#)); do
 done
 ((db || admin)) || ql_die "choose --db, --admin or both (see --help)"
 ql_require_rootless
-app_lock
+ql_lock "$APP"
 [[ -f $ENV_FILE ]] || ql_die "$ENV_FILE does not exist: run scripts/install.sh first"
 app_env_load
 
