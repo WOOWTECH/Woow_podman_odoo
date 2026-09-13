@@ -273,36 +273,132 @@ t_the_capture_path_works_with_an_empty_suffix() {
   return 0
 }
 
-# ---- the per-app lock must not leak into the containers the rollback starts ------------------------
-t_a_container_started_by_the_rollback_does_not_inherit_the_lock() {
-  # ql_lock keeps an open file descriptor for the life of the script, and bash does not mark it
-  # close-on-exec. A container this script starts itself inherits it into conmon and keeps the
-  # flock held after the script exits, so the NEXT install/backup/upgrade/rollback refuses with
-  # "another install/upgrade/uninstall is running". Reproduced live on toypark1234 against the
-  # UNMODIFIED scripts/install.sh and scripts/backup.sh, so it is the vendored library's lock, not
-  # this migration's - but this migration is what starts a legacy container directly.
-  local f=$T/lockfile
-  : >"$f"
-  exec {QL_LOCK_FD}>"$f"
-  flock -n "$QL_LOCK_FD" || die_t "could not take the test lock"
-  bash -c 'ls -l /proc/self/fd' | grep -q "$f" \
-    || die_t "the fixture is wrong: a plain child should inherit the lock descriptor"
-  app_unlocked bash -c 'ls -l /proc/self/fd' | grep -q "$f" \
-    && die_t "app_unlocked still handed the lock descriptor to the child"
-  # the lock itself survives: the variable and the descriptor are untouched in this shell
-  [[ -n ${QL_LOCK_FD:-} ]] || die_t "app_unlocked lost QL_LOCK_FD"
-  flock -n "$QL_LOCK_FD" || die_t "this shell no longer holds the lock"
-  # and without a lock at all it is an ordinary call
-  local saved=$QL_LOCK_FD
-  QL_LOCK_FD=''
-  eq "$(app_unlocked printf hello)" hello "app_unlocked without a lock"
-  QL_LOCK_FD=$saved
+# ---- the per-app lock, as quadlet-lib 1.5.0 defines it ---------------------------------------
+# Up to 1.4.0 the lock was an flock on a descriptor opened with `exec {fd}>`, which bash does not
+# mark close-on-exec. Rootless podman leaves children behind by design - conmon, slirp4netns,
+# rootlessport, the catatonit pause process - and every one of them inherited that descriptor and
+# held the flock for as long as the container lived. The next install, upgrade, uninstall or
+# --rollback then died with "another install/upgrade/uninstall is running". Reproduced live on
+# toypark1234, where /proc named conmon and slirp4netns as the two holders, and worked around here
+# with an app_unlocked wrapper that closed the descriptor for one command.
+#
+# 1.5.0 deletes the descriptor instead. The lock is the DIRECTORY <state>/<app>/lock.d holding an
+# owner record of boot id, pid and that pid's start time, and "held" means that owner is still
+# alive: a crashed lock is taken over, not waited on. QL_LOCK_FD survives as an always-empty
+# variable so that scripts written against <= 1.4.0 still parse under `set -u`, which makes every
+# app_unlocked wrapper a no-op. The wrapper is therefore gone, and what follows pins the property
+# it was standing in for instead of pinning the wrapper.
+
+t_the_lock_keeps_no_descriptor_for_a_child_to_inherit() {
+  local dir rec f n=0
+  ql_lock odoo18
+  eq "${QL_LOCK_FD:-}" '' "QL_LOCK_FD (1.5.0 keeps it only so <= 1.4.0 callers still parse)"
+  dir=$(_ql_state_dir odoo18)/lock.d
+  [[ -d $dir ]] || die_t "ql_lock did not create the lock directory $dir"
+  read -r rec <"$dir/owner" || die_t "the lock directory carries no owner record"
+  eq "$rec" "$(_ql_owner_record)" "the owner record of the lock this shell holds"
+  for f in /proc/self/fd/*; do
+    if [[ $(readlink -- "$f" 2>/dev/null) == "$dir"* ]]; then n=$((n + 1)); fi
+  done
+  eq "$n" 0 "descriptors in this shell pointing at the lock"
+  # ... and the same seen from an ordinary child, which is what conmon is
+  # shellcheck disable=SC2016 # the child shell expands these, not this one
+  eq "$(bash -c 'n=0
+    for f in /proc/self/fd/*; do
+      if [[ $(readlink -- "$f" 2>/dev/null) == "$1"* ]]; then n=$((n + 1)); fi
+    done
+    printf %s "$n"' _ "$dir")" 0 "lock descriptors an ordinary child inherits"
   return 0
 }
 
-t_the_rollback_starts_legacy_containers_without_the_lock() {
-  grep -qE 'app_unlocked podman start' "$REPO/scripts/migrate-legacy.sh" \
-    || die_t "the rollback starts a legacy container with the lock descriptor still open"
+t_a_rollback_can_take_the_lock_after_an_earlier_run_left_processes_behind() {
+  # The user-visible property app_unlocked was faking. A run takes the lock, leaves a process
+  # running that outlives it - conmon's stand-in, and the reason the old descriptor leaked - and
+  # exits normally. The rollback is this shell, and it must be able to take the same lock while
+  # that process is still alive. Under 1.4.0 it could not: the flock was still held.
+  local lingerer
+  # shellcheck disable=SC2016 # the child shell expands these, not this one
+  bash -c '
+    . "$1/scripts/lib/quadlet-lib.sh"
+    ql_lock odoo18
+    sleep 30 &
+    printf "%s" "$!" >"$2"
+  ' _ "$REPO" "$T/lingerer.pid" || die_t "the first run could not take the lock"
+  lingerer=$(cat "$T/lingerer.pid")
+  kill -0 "$lingerer" 2>/dev/null || die_t "the fixture is wrong: the lingering child is already gone"
+  ql_lock odoo18
+  eq "$(head -n1 "$(_ql_state_dir odoo18)/lock.d/owner")" "$(_ql_owner_record)" \
+    "the owner record after the rollback took the lock"
+  kill -0 "$lingerer" 2>/dev/null \
+    || die_t "the lingering child died first; the test proved nothing"
+  kill -9 "$lingerer" 2>/dev/null || true
+  return 0
+}
+
+t_a_crashed_run_does_not_block_the_lock_for_ever() {
+  # The same thing with no chance to tidy up: SIGKILL, so no EXIT trap runs and the lock directory
+  # is left behind while a child of the dead run is still alive. Ownership is decided by the owner
+  # record, not by the directory, so the next run takes the lock over and says so.
+  local lingerer dir err
+  dir=$(_ql_state_dir odoo18)/lock.d
+  # shellcheck disable=SC2016 # the child shell expands these, not this one
+  bash -c '
+    . "$1/scripts/lib/quadlet-lib.sh"
+    ql_lock odoo18
+    sleep 30 &
+    printf "%s" "$!" >"$2"
+    kill -9 $$
+  ' _ "$REPO" "$T/crashed.pid" || true
+  lingerer=$(cat "$T/crashed.pid" 2>/dev/null) || die_t "the fixture never started the lingering child"
+  kill -0 "$lingerer" 2>/dev/null || die_t "the fixture is wrong: the lingering child is already gone"
+  [[ -d $dir ]] || die_t "the fixture is wrong: the killed run still tidied its own lock away"
+  err=$T/takeover.err
+  ql_lock odoo18 2>"$err" # a ql_die here would end the test, which is exactly the 1.4.0 behaviour
+  has "$(cat "$err")" "taking over the lock left behind by pid" "the takeover warning"
+  eq "$(head -n1 "$dir/owner")" "$(_ql_owner_record)" "the owner record after the takeover"
+  kill -9 "$lingerer" 2>/dev/null || true
+  return 0
+}
+
+t_a_second_live_run_is_still_refused() {
+  # Dropping app_unlocked must not turn the lock into a no-op. While the owner is ALIVE the lock
+  # is still exclusive and a second run dies, rather than cutting over on top of the first.
+  local holder dir n=0
+  dir=$(_ql_state_dir odoo18)/lock.d
+  # shellcheck disable=SC2016 # the child shell expands these, not this one
+  bash -c '. "$1/scripts/lib/quadlet-lib.sh"; ql_lock odoo18; sleep 30' _ "$REPO" &
+  holder=$!
+  while ((n++ < 200)) && [[ ! -s $dir/owner ]]; do sleep 0.05; done
+  [[ -s $dir/owner ]] || { kill -9 "$holder" 2>/dev/null; die_t "the holder never took the lock"; }
+  # a fresh process with no QL_LOCK_HELD to inherit: it must be refused outright
+  # shellcheck disable=SC2016 # the child shell expands these, not this one
+  expect_fail env -u QL_LOCK_HELD bash -c '. "$1/scripts/lib/quadlet-lib.sh"; ql_lock odoo18' _ "$REPO"
+  has "$OUT" "another install/upgrade/uninstall of odoo18 is running"
+  kill -9 "$holder" 2>/dev/null || true
+  return 0
+}
+
+t_a_child_script_reuses_the_lock_its_caller_holds() {
+  # 1.5.0 exports QL_LOCK_HELD, so a wrapper can hold the lock and still call install.sh: the
+  # nested ql_lock keeps the caller's lock instead of dying on it. That is the library contract
+  # which replaces every local "skip ql_lock when the wrapper already holds it" hack.
+  ql_lock odoo18
+  [[ -n ${QL_LOCK_HELD:-} ]] || die_t "ql_lock did not publish QL_LOCK_HELD for child scripts"
+  # shellcheck disable=SC2016 # the child shell expands these, not this one
+  expect_ok bash -c '. "$1/scripts/lib/quadlet-lib.sh"; ql_lock odoo18' _ "$REPO"
+  has "$OUT" "keeping the lock held by the calling script"
+  [[ -d $(_ql_state_dir odoo18)/lock.d ]] || die_t "the child released the lock its caller holds"
+  return 0
+}
+
+t_no_1_4_0_lock_workaround_survives_in_the_scripts() {
+  # app_unlocked closed a descriptor 1.5.0 never opens, and WOOW_QL_LOCK_HELD skipped a nested
+  # ql_lock the library now resolves itself - and would silently stop install.sh locking at all
+  # whenever that variable is stale in the environment. Neither may come back.
+  local hit
+  hit=$(grep -rnE 'app_unlocked|QL_LOCK_FD|WOOW_QL_LOCK_HELD' "$REPO/scripts" --include='*.sh' \
+    | grep -v '/lib/quadlet-lib\.sh:') || true
+  [[ -z $hit ]] || die_t "a quadlet-lib 1.4.0 lock workaround is back:"$'\n'"$hit"
   return 0
 }
 

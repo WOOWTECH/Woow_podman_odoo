@@ -12,27 +12,6 @@ app_running() { [[ $(podman inspect --format '{{.State.Running}}' "$1" 2>/dev/nu
 app_is_installed() { [[ -s "$(app_state_dir)/manifest" ]]; }
 app_unit_exists() { [[ -n $(systemctl --user show -p FragmentPath --value "$1" 2>/dev/null) ]]; }
 
-# app_unlocked <command...>: run a command without this script's per-app lock file descriptor.
-#
-# ql_lock holds the lock through a file descriptor that stays open for the rest of the script
-# (`exec {fd}>lock; flock -n $fd`), and bash does not mark it close-on-exec. A container that this
-# script starts ITSELF therefore inherits that descriptor into conmon, rootlessport and the
-# container's own process - all of which outlive the script - and the flock is held for as long as
-# the container runs. The next scripts/install.sh, backup.sh, upgrade.sh or
-# `migrate-legacy.sh --rollback` then dies with "another install/upgrade/uninstall is running".
-#
-# Verified live on toypark1234, podman 4.9.3: after a rollback that ran `podman start odoo18-db
-# odoo18-web`, `fuser` showed conmon, rootlessport and the container process holding
-# ~/.local/state/woow-quadlet/odoo18/lock, and the UNMODIFIED scripts/install.sh and
-# scripts/backup.sh both refused; `podman restart` on the two containers freed it again.
-#
-# Containers started through systemd are not affected - the user manager forks those, not us - so
-# this only matters where the migration starts a legacy container directly, which is the rollback.
-# `cmd {QL_LOCK_FD}>&-` closes the descriptor for that one command and leaves the variable (and the
-# lock) intact.
-app_unlocked() {
-  if [[ -n ${QL_LOCK_FD:-} ]]; then "$@" {QL_LOCK_FD}>&-; else "$@"; fi
-}
 
 # app_spec_path <abs path>: rewrite $HOME/... as %h/... so a rendered unit carries no literal home
 # path (systemd expands %h when it starts the unit; STANDARD section 2).

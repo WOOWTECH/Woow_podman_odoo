@@ -168,7 +168,7 @@ rollback() {
   fi
   # Whether or not a unit did it, the containers have to run again: the database first.
   for c in "$DB_CONTAINER" "$WEB_CONTAINER"; do
-    if podman container exists "$c" && ! app_running "$c"; then app_unlocked podman start "$c" >/dev/null; fi
+    if podman container exists "$c" && ! app_running "$c"; then podman start "$c" >/dev/null; fi
   done
   for u in "${units[@]}"; do
     [[ $u == odoo18-health.timer ]] || continue
