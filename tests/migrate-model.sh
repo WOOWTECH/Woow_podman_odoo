@@ -24,8 +24,9 @@
 # Every test runs in its own subshell on purpose (isolated HOME, shim state, env), so the
 # "modified in a subshell" notes do not apply here. Several tests replace a helper of
 # scripts/legacy-helpers.sh with a stub so the logic above it can be exercised without podman;
-# the linter cannot see that the code under test calls those stubs.
-# shellcheck disable=SC2030,SC2031,SC2329
+# the linter cannot see that the code under test calls those stubs (SC2329 on 0.10+, SC2317 on 0.9,
+# which is what the CI runner ships).
+# shellcheck disable=SC2030,SC2031,SC2317,SC2329
 # shellcheck source-path=SCRIPTDIR
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
