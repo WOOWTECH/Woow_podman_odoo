@@ -74,6 +74,50 @@ if [[ $code == 200 ]]; then pass "A4 /web/health returns 200"; else fail "A4 /we
 code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$url/" || true)
 if [[ $code =~ ^(200|30[1237])$ ]]; then pass "A4 / returns $code"; else fail "A4 / returned $code"; fi
 
+if [[ $(ql_env_get WOOW_ODOO_GATEWAY_ENABLED False) == True ]]; then
+  gateway_host=$(app_local_host "$(ql_env_get WOOW_ODOO_GATEWAY_BIND 127.0.0.1)")
+  gateway_port=$(ql_env_get WOOW_ODOO_GATEWAY_PORT 18080)
+  gateway_url=http://$gateway_host:$gateway_port
+  if systemctl --user is-active --quiet odoo-gateway.service; then pass 'G1 gateway unit is active'; else fail 'G1 gateway unit is inactive'; fi
+  if ql_wait_container_healthy odoo18-gateway 120 2>/dev/null; then pass 'G1 gateway container is healthy'; else fail 'G1 gateway container is unhealthy'; fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$gateway_url/web/health" || true)
+  if [[ $code == 200 ]]; then pass 'G2 gateway proxies Odoo health'; else fail "G2 Odoo gateway health returned $code"; fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$gateway_url/web/database/manager" || true)
+  if [[ $code == 404 ]]; then pass 'G2 gateway denies database management'; else fail "G2 database manager returned $code"; fi
+  headers=$(curl -sSI -m 10 -H 'X-Forwarded-Proto: https' "$gateway_url/nginx-health" || true)
+  if grep -qi '^Strict-Transport-Security: max-age=15552000' <<<"$headers"; then pass 'G3 HTTPS gateway response has HSTS'; else fail 'G3 HSTS missing'; fi
+  http_headers=$(curl -sS -D - -o /dev/null -m 10 "$gateway_url/" || true)
+  https_headers=$(curl -sS -D - -o /dev/null -m 10 -H 'X-Forwarded-Proto: https' "$gateway_url/" || true)
+  if grep -qi '^Set-Cookie:.*session_id=.*SameSite=Lax' <<<"$http_headers" &&
+     ! grep -qi '^Set-Cookie:.*session_id=.*Secure' <<<"$http_headers"; then
+    pass 'G3 HTTP session cookie is usable on loopback'
+  else
+    fail 'G3 HTTP session cookie has wrong security flags'
+  fi
+  if grep -qi '^Set-Cookie:.*session_id=.*SameSite=Lax' <<<"$https_headers" &&
+     grep -qi '^Set-Cookie:.*session_id=.*Secure' <<<"$https_headers"; then
+    pass 'G3 HTTPS session cookie is Secure'
+  else
+    fail 'G3 HTTPS session cookie has wrong security flags'
+  fi
+  marker=woow_gateway_token_$$_$RANDOM
+  curl -s -o /dev/null -m 10 "$gateway_url/web/reset_password?token=$marker" || true
+  sleep 1
+  if podman logs --tail 100 odoo18-gateway 2>&1 | grep -qF "$marker"; then fail 'G3 gateway log contains a query token'; else pass 'G3 gateway log omits query tokens'; fi
+  if [[ $(ql_env_get WOOW_ODOO_WORKERS 0) != 0 ]]; then
+    marker=woow_ws_token_$$_$RANDOM
+    curl -s -o /dev/null -m 10 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+      -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+      "$gateway_url/websocket?token=$marker" || true
+    sleep 1
+    if podman logs --tail 100 odoo18-web 2>&1 | grep -qF "$marker"; then
+      fail 'G3 Odoo longpolling log contains a query token'
+    else
+      pass 'G3 Odoo longpolling log omits query tokens'
+    fi
+  fi
+fi
+
 if ((quick)); then
   printf '%s passed, %s failed, %s warnings (quick)\n' "$npass" "$nfail" "$nwarn"
   ((nfail == 0))
@@ -127,14 +171,15 @@ elif [[ -n $admin_pw ]]; then
 fi
 unset db_pw admin_pw
 
-# A8 pgvector is available at the pinned version (throwaway database, dropped again)
-want_vec=${DB_IMAGE#*pgvector:}
-want_vec=${want_vec%%-*}
+# A8 pgvector is available at the version shipped by the running database image.
+want_vec=$(podman exec odoo18-db psql -X -U odoo -d postgres -Atqc \
+  "SELECT default_version FROM pg_available_extensions WHERE name='vector'" 2>/dev/null || true)
+[[ -n $want_vec ]] || fail 'A8 running PostgreSQL image has no pgvector extension'
 probe_db=woow_smoke_vector_$$
 if podman exec odoo18-db createdb -U odoo "$probe_db" >/dev/null 2>&1 \
   && got=$(podman exec odoo18-db psql -X -U odoo -d "$probe_db" -v ON_ERROR_STOP=1 -Atqc \
     "CREATE EXTENSION vector; SELECT extversion FROM pg_extension WHERE extname = 'vector'" 2>/dev/null) \
-  && [[ $got == "$want_vec" ]]; then
+  && [[ -n $want_vec && $got == "$want_vec" ]]; then
   pass "A8 pgvector $want_vec works"
 else
   fail "A8 pgvector: expected $want_vec, got '${got:-error}'"

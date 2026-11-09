@@ -15,11 +15,16 @@ check "a moved port and a custom addons dir are rendered" has_line fixture-custo
 check "the custom addons dir stays read-only" has_line fixture-custom odoo.container 'Volume=%h/src/my-addons:/mnt/extra-addons:ro,Z'
 check "the default Odoo image remains pinned" has_line example odoo.container \
   'Image=docker.io/library/odoo:18.0-20260817@sha256:259fa933bf3ee7f3e375bd74d1e0bc28bd75955159723be477359e0fdb8acf67'
+check "the default PostgreSQL image remains pinned" has_line example odoo-db.container \
+  'Image=docker.io/pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9'
+check "a digest-pinned PG17 image renders" has_line fixture-db17 odoo-db.container \
+  'Image=jcr-prod.woowtech.io/woow-paas-docker-local/paas-postgres:17.11-20260928.1549@sha256:dbd1fed8882043f45bf759e8f7c73092505ef0afef7a23a93b177e6f7c2c840f'
 check "a digest-pinned external Odoo image renders" has_line fixture-image odoo.container \
   'Image=docker.io/library/odoo:18.0-20260926@sha256:eea33387602b203a834d60eee027fcc0d9fcdfd47e310a2d1740ea82322445d7'
 check "a valid first-run bootstrap configuration renders" has_line fixture-bootstrap odoo.container \
   'PublishPort=127.0.0.1:18069:8069'
 check "BIND=all omits the host address" has_line fixture-lan odoo.container 'PublishPort=18069:8069'
+check "optional gateway binds on loopback" has_line example+optional odoo-gateway.container 'PublishPort=127.0.0.1:18080:8080'
 check "the database publishes no port" bash -c "! grep -q '^PublishPort=' '$WORK/example/out/odoo-db.container'"
 check "no unit is named odoo18 (a legacy odoo18.service would shadow it)" \
   bash -c "! ls '$REPO'/quadlet | grep -qE '^odoo18\\.(container|service)$'"
@@ -27,7 +32,8 @@ check "no unit is named odoo18 (a legacy odoo18.service would shadow it)" \
 # The odoo.conf template renders completely, and only from its own whitelist.
 conf_render() {
   ql_render "$REPO/config/odoo.conf.template" - "$REPO/config/odoo.conf.render-vars" - \
-    POSTGRES_PASSWORD=db-dummy ODOO_ADMIN_PASSWORD=admin-dummy WOOW_ODOO_LIST_DB=True
+    POSTGRES_PASSWORD=db-dummy ODOO_ADMIN_PASSWORD=admin-dummy WOOW_ODOO_LIST_DB=True \
+    WOOW_ODOO_WORKERS=2 WOOW_ODOO_MAX_CRON_THREADS=2 SMTP_LINES=''
 }
 conf=$( (conf_render) 2>/dev/null) || conf=''
 check "odoo.conf.template renders" test -n "$conf"
@@ -35,7 +41,9 @@ check "the rendered conf carries the database password" grep -qx 'db_password = 
 check "the rendered conf carries the master password" grep -qx 'admin_passwd = admin-dummy' <<<"$conf"
 check "the conf points at the Quadlet database container" grep -qx 'db_host = odoo18-db' <<<"$conf"
 check "the conf includes curated image and host addons" grep -qx \
-  'addons_path = /usr/lib/python3/dist-packages/odoo/addons,/opt/woow/addons,/mnt/extra-addons' <<<"$conf"
+  'addons_path = /usr/lib/python3/dist-packages/odoo/addons,/opt/woow/addons,/opt/woow/ha-addons,/mnt/extra-addons' <<<"$conf"
+check "worker and cron counts render" bash -c "grep -qx 'workers = 2' <<<\"\$1\" && grep -qx 'max_cron_threads = 2' <<<\"\$1\"" _ "$conf"
+check "SMTP is absent until configured" bash -c "! grep -q '^smtp_' <<<\"\$1\"" _ "$conf"
 check "no default master password in the template" bash -c "! grep -qE '^admin_passwd *= *admin *\$' '$REPO/config/odoo.conf.template'"
 
 # Invalid knobs must stop the render before any file is written.
@@ -56,6 +64,20 @@ reject "a relative addons dir" WOOW_ODOO_ADDONS_DIR 'addons'
 reject "an addons dir with '..'" WOOW_ODOO_ADDONS_DIR '%h/../etc'
 reject "a list_db value other than True/False" WOOW_ODOO_LIST_DB yes
 reject "an unpinned Odoo image" WOOW_ODOO_IMAGE 'docker.io/library/odoo:18.0'
+reject "an unpinned PostgreSQL image" WOOW_ODOO_DB_IMAGE 'docker.io/library/postgres:17'
 reject "an Odoo image containing a unit separator" WOOW_ODOO_IMAGE 'docker.io/library/odoo:18.0;ExecStart=evil'
 reject "a database name with a quote" WOOW_ODOO_DEFAULT_DB "odoo'bad"
 reject "an admin login without a database" WOOW_ODOO_ADMIN_LOGIN 'operator@example.invalid'
+reject "too many workers" WOOW_ODOO_WORKERS 17
+reject "SMTP server config injection" WOOW_ODOO_SMTP_SERVER 'host;password=bad'
+reject "SMTP port overflow" WOOW_ODOO_SMTP_PORT 70000
+gateway_bad=$WORK/bad-gateway-bypass.env
+sed -e 's/^WOOW_ODOO_GATEWAY_ENABLED=.*/WOOW_ODOO_GATEWAY_ENABLED=True/' \
+    -e 's/^WOOW_ODOO_BIND=.*/WOOW_ODOO_BIND=all/' \
+    "$REPO/config/odoo18.env.example" >"$gateway_bad"
+if (render_variant "$WORK/example/src" "$gateway_bad" "$WORK/example/out") >/dev/null 2>&1; then
+  echo 'FAIL a gateway with a bypassable Odoo bind was accepted'
+  failures=$((failures + 1))
+else
+  echo 'ok   a gateway with a bypassable Odoo bind is refused'
+fi

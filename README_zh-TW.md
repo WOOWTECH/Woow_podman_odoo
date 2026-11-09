@@ -88,6 +88,11 @@ podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-passw
 | `WOOW_ODOO_BIND` | `127.0.0.1` | Odoo 發布的位址：`127.0.0.1`、本機某個 IPv4 位址，或 `all`。 |
 | `WOOW_ODOO_PORT` | `18069` | Odoo 的主機埠。 |
 | `WOOW_ODOO_IMAGE` | 空值（預設釘版官方映像） | 可選用附 `@sha256:` digest 的預建 Odoo 映像，供已驗證的 PaaS 模組組合使用；映像須以 uid 100、gid 101 執行 Odoo。私有 registry 先用 Podman 登入，憑證不要寫入此檔。 |
+| `WOOW_ODOO_DB_IMAGE` | 空值（釘版 PG16 映像） | 全新實例可選釘版資料庫映像；既有資料卷的 `PG_VERSION` 與映像主版本不同時安裝器會拒絕。 |
+| `WOOW_ODOO_GATEWAY_ENABLED` | `False` | 可選 nginx 入口；啟用時 Odoo 必須綁 `127.0.0.1`，入口封鎖 `/web/database/*` 並略去 access log 的查詢字串。 |
+| `WOOW_ODOO_GATEWAY_BIND`、`WOOW_ODOO_GATEWAY_PORT` | `127.0.0.1`、`18080` | 可選入口位址與埠；對外服務時先接 TLS 終止層。 |
+| `WOOW_ODOO_WORKERS`、`WOOW_ODOO_MAX_CRON_THREADS` | `0`、`1` | 網頁 worker 及排程執行緒；worker > 0 時入口將 WebSocket 轉到 8072。 |
+| `WOOW_ODOO_EMAIL_FROM`、`WOOW_ODOO_SMTP_*` | 空值／埠 `587`／TLS `True` | 可選寄信設定；登入密碼放 Podman secret `odoo18-smtp-password`，不可寫入此設定檔。 |
 | `WOOW_ODOO_ADDONS_DIR` | `%h/.local/share/odoo18/addons` | 以唯讀掛載到 `/mnt/extra-addons` 的主機目錄；`%h` 是你的家目錄。 |
 | `WOOW_ODOO_LIST_DB` | `True` | 資料庫建立完成後可設為 `False` 隱藏資料庫管理介面。 |
 | `WOOW_ODOO_DEFAULT_DB` | 空值 | 可選首次自動建立的資料庫名稱；需與 `WOOW_ODOO_ADMIN_LOGIN` 一起設定。 |
@@ -96,12 +101,22 @@ podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-passw
 
 其他設定（workers、記憶體上限、`proxy_mode` 等）在 `config/odoo.conf.template`。編輯樣板後執行
 `scripts/install.sh`，conf secret 會重新算出並重啟 Odoo。
-模組路徑同時包含映像內的 `/opt/woow/addons` 與主機唯讀掛載的 `/mnt/extra-addons`；預設官方映像沒有前者。
+模組路徑同時包含映像內的 `/opt/woow/addons`、`/opt/woow/ha-addons` 與主機唯讀掛載的 `/mnt/extra-addons`；預設官方映像沒有前兩者。
 首次自動建庫只接受 `WOOW_ODOO_BIND=127.0.0.1`、`WOOW_ODOO_LIST_DB=True`。安裝器會保留已完成初始化的資料庫，
 遇到不完整的資料庫則停止，避免重跑 `-i base` 覆蓋既有管理員資料；建庫後可把 `WOOW_ODOO_LIST_DB` 改為 `False`。
 PaaS cloud 映像應從有權限的 `paas-odoo-ci` 原始碼及 `Dockerfile.cloud` 建置，透過
 `podman image inspect IMAGE --format '{{index .RepoDigests 0}}'` 取 digest 後填入 `WOOW_ODOO_IMAGE`。
 若主機已有資料，先改這個設定再執行 `scripts/upgrade.sh --update-modules`，讓升級先做冷備份與單元快照。
+
+### 全新 HA 與 PaaS cloud 模組組合
+
+[功能對照紀錄](docs/HA_PAAS_PARITY_2026-11-10.md) 說明全新實例的實測與尚未對齊之處。PaaS cloud 映像有 13 顆 tenant 模組；若要再加入公開 HA 的 7 顆範例模組，先從有權限的 PaaS CI 原始碼建 cloud 映像，再執行：
+
+```bash
+scripts/build-ha-cloud-image.sh <帶-digest-的-cloud-映像> <固定-51856b0-且乾淨的-odoo-addons-checkout> localhost/woow-odoo-ha-cloud:local
+```
+
+把腳本輸出的本機 digest 設為 `WOOW_ODOO_IMAGE` 後，以 `scripts/install.sh` 建立新庫。可設定 `WOOW_ODOO_GATEWAY_ENABLED=True`；Odoo 本體仍應綁回圈位址，入口預設為 `127.0.0.1:18080`。這組映像**未包含** PaaS platform 的約 40 顆模組與外部 `woow_paas_platform`；私有 PaaS 原始碼與憑證不會進入公開倉庫。
 
 ### Addons 與 rootless 權限
 
@@ -130,6 +145,8 @@ podman exec odoo18-web odoo -c /etc/odoo/odoo.conf -d <資料庫> -u <模組> --
 | `odoo18-postgres-password` | 資料庫角色 `odoo` 的密碼 | 掛載於 `/run/secrets/postgres_password`；初始化資料卷時 PostgreSQL 透過 `POSTGRES_PASSWORD_FILE` 讀取 |
 | `odoo18-admin-password` | Odoo 主控（資料庫管理）密碼 | 不掛載，只算進 conf |
 | `odoo18-odoo-conf` | 算好的 `/etc/odoo/odoo.conf` | 唯讀掛載，擁有者 `odoo`、權限 0400 |
+| `odoo18-gateway-conf` | 可選 nginx 設定 | 唯讀掛載於入口容器 |
+| `odoo18-smtp-password` | 可選 SMTP 登入密碼 | 設定 SMTP 使用者時才算進 Odoo 的私有設定 |
 
 以 `scripts/rotate-secrets.sh --db` 或 `--admin` 輪替。`--db` 會修改 PostgreSQL 的角色密碼、取代 secret、
 重新算出 conf 並重啟 Odoo，全程不把密碼放進指令列。若要自訂值，請在私人終端機執行：

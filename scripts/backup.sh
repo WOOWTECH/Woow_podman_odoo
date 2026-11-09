@@ -39,20 +39,30 @@ ql_lock "$APP"
 ql_wait_container_healthy odoo18-db 120 \
   || ql_die "odoo18-db did not become healthy within 120 seconds; refusing to back up"
 web_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-web 2>/dev/null || echo false)
+gateway_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-gateway 2>/dev/null || echo false)
 actual_odoo_image=$(podman inspect --format '{{.ImageName}}' odoo18-web 2>/dev/null || true)
+actual_db_image=$(podman inspect --format '{{.ImageName}}' odoo18-db 2>/dev/null || true)
 if [[ $actual_odoo_image != *@sha256:* ]]; then
   actual_odoo_image=$(sed -n 's/^Image=//p' "$HOME/.config/containers/systemd/odoo.container" 2>/dev/null || true)
 fi
 [[ $actual_odoo_image == *@sha256:* ]] || ql_die "cannot read the deployed Odoo image for backup metadata"
+if [[ $actual_db_image != *@sha256:* ]]; then
+  actual_db_image=$(sed -n 's/^Image=//p' "$HOME/.config/containers/systemd/odoo-db.container" 2>/dev/null || true)
+fi
+[[ $actual_db_image == *@sha256:* ]] || ql_die "cannot read the deployed database image for backup metadata"
 (umask 077 && mkdir -p -- "$BACKUP_ROOT") || ql_die "cannot create $BACKUP_ROOT"
 chmod 700 "$BACKUP_ROOT"
 staging=$(mktemp -d "$BACKUP_ROOT/.backup.XXXXXX")
 web_restored=0
+gateway_restored=0
 cleanup() {
   local status=$?
   podman unshare rm -rf -- "$staging" >/dev/null 2>&1 || true
   if [[ $web_was_running == true && $web_restored == 0 ]]; then
     systemctl --user start odoo.service >/dev/null 2>&1 || ql_warn "could not start odoo.service again"
+  fi
+  if [[ $gateway_was_running == true && $gateway_restored == 0 ]]; then
+    systemctl --user start odoo-gateway.service >/dev/null 2>&1 || ql_warn "could not start odoo-gateway.service again"
   fi
   return "$status"
 }
@@ -100,7 +110,7 @@ dblist=${dblist%,}
 secrets_json=false
 ((include_secrets == 0)) || secrets_json=true
 printf '{"project":"odoo18","created_utc":"%s","databases":[%s],"images":{"odoo":"%s","database":"%s"},"secrets_included":%s}\n' \
-  "$stamp" "$dblist" "$actual_odoo_image" "$DB_IMAGE" "$secrets_json" >"$root/metadata.json"
+  "$stamp" "$dblist" "$actual_odoo_image" "$actual_db_image" "$secrets_json" >"$root/metadata.json"
 
 podman unshare bash -c 'cd "$1"; find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | while IFS= read -r -d "" f; do sha256sum "${f#./}"; done >SHA256SUMS' sh "$root"
 podman unshare find "$root" -type d -exec chmod 700 {} +
@@ -124,6 +134,11 @@ if [[ $web_was_running == true ]]; then
   systemctl --user start odoo.service
   web_restored=1
   app_wait_healthy odoo18-web 300 odoo.service
+fi
+if [[ $gateway_was_running == true ]]; then
+  systemctl --user start odoo-gateway.service
+  gateway_restored=1
+  app_wait_healthy odoo18-gateway 180 odoo-gateway.service
 fi
 ql_info "backup complete: $archive ($(du -h "$archive" | cut -f1))"
 if ((automated)); then

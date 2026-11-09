@@ -20,21 +20,66 @@ odoo_reconcile_resources() {
   done
 }
 
+# A fresh PG17 image may be selected, but a PG16 data directory must never be started by it.
+odoo_check_db_volume_major() {
+  local image=$1 major mountpoint stored
+  major=$(podman run --rm --network=none --entrypoint postgres "$image" --version 2>/dev/null) \
+    || ql_die "cannot read PostgreSQL version from $image"
+  [[ $major =~ PostgreSQL\)[[:space:]]([0-9]+)\. ]] \
+    || ql_die "unexpected PostgreSQL version output from $image"
+  major=${BASH_REMATCH[1]}
+  if ! podman volume exists odoo18-db-data; then return 0; fi
+  mountpoint=$(podman volume inspect --format '{{.Mountpoint}}' odoo18-db-data) \
+    || ql_die 'cannot inspect Odoo database volume'
+  [[ $mountpoint == /* && $mountpoint != / ]] || ql_die 'unsafe Odoo database volume mountpoint'
+  if podman unshare test -f "$mountpoint/PG_VERSION"; then
+    stored=$(podman unshare cat "$mountpoint/PG_VERSION") || ql_die 'cannot read PG_VERSION from Odoo volume'
+    [[ $stored == "$major" ]] \
+      || ql_die "Odoo volume is PostgreSQL $stored; configured image is PostgreSQL $major. Use a new empty instance/volume; do not point a newer server at existing files"
+  fi
+}
+
 # odoo_render_conf_secret: render config/odoo.conf.template with both passwords and WOOW_ODOO_LIST_DB
 # and store the result as the odoo18-odoo-conf secret (replaced only when it differs). Sets
 # QL_SECRET_CHANGED=1 when it changed, so the caller restarts odoo.service.
 odoo_render_conf_secret() {
-  local xt=0 db admin list ODOO_CONF
+  local xt=0 db admin list workers cron smtp_lines smtp_server smtp_user smtp_password ODOO_CONF
   [[ $- == *x* ]] && xt=1 && set +x
   db=$(app_secret_read odoo18-postgres-password || true)
   admin=$(app_secret_read odoo18-admin-password || true)
   list=$(ql_env_get WOOW_ODOO_LIST_DB True)
+  workers=$(ql_env_get WOOW_ODOO_WORKERS 0)
+  cron=$(ql_env_get WOOW_ODOO_MAX_CRON_THREADS 1)
+  smtp_lines=''
+  if [[ -n $(ql_env_get WOOW_ODOO_EMAIL_FROM '') ]]; then
+    smtp_lines+="email_from = $(ql_env_get WOOW_ODOO_EMAIL_FROM)"$'\n'
+  fi
+  smtp_server=$(ql_env_get WOOW_ODOO_SMTP_SERVER '')
+  smtp_user=$(ql_env_get WOOW_ODOO_SMTP_USER '')
+  if [[ -n $smtp_server ]]; then
+    smtp_lines+="smtp_server = $smtp_server"$'\n'
+    smtp_lines+="smtp_port = $(ql_env_get WOOW_ODOO_SMTP_PORT 587)"$'\n'
+    smtp_lines+="smtp_ssl = $(ql_env_get WOOW_ODOO_SMTP_SSL True)"$'\n'
+    if [[ -n $smtp_user ]]; then
+      smtp_lines+="smtp_user = $smtp_user"$'\n'
+      smtp_password=$(app_secret_read odoo18-smtp-password || true)
+      if [[ -z $smtp_password || $smtp_password == *$'\n'* || $smtp_password == *$'\r'* ]]; then
+        ((xt)) && set -x
+        ql_die 'SMTP user requires a nonempty, single-line Podman secret odoo18-smtp-password'
+      fi
+      smtp_lines+="smtp_password = $smtp_password"$'\n'
+      smtp_password=''
+    fi
+  fi
   if [[ -z $db || -z $admin ]]; then
     ((xt)) && set -x
     ql_die "secrets odoo18-postgres-password and odoo18-admin-password must exist before the conf is rendered"
   fi
   ODOO_CONF=$(ql_render "$REPO/config/odoo.conf.template" - "$REPO/config/odoo.conf.render-vars" - \
-    "POSTGRES_PASSWORD=$db" "ODOO_ADMIN_PASSWORD=$admin" "WOOW_ODOO_LIST_DB=$list") || ODOO_CONF=''
+    "POSTGRES_PASSWORD=$db" "ODOO_ADMIN_PASSWORD=$admin" "WOOW_ODOO_LIST_DB=$list" \
+    "WOOW_ODOO_WORKERS=$workers" "WOOW_ODOO_MAX_CRON_THREADS=$cron" \
+    "SMTP_LINES=$smtp_lines") || ODOO_CONF=''
+  smtp_lines=''
   db='' admin=''
   if [[ -z $ODOO_CONF ]]; then
     ((xt)) && set -x
@@ -46,6 +91,20 @@ odoo_render_conf_secret() {
   ODOO_CONF=''
   ((xt)) && set -x
   return 0
+}
+
+# Render a query-safe gateway configuration; its only variable is the Odoo websocket port.
+odoo_render_gateway_conf_secret() {
+  local workers ws ODOO_GATEWAY_CONF
+  workers=$(ql_env_get WOOW_ODOO_WORKERS 0)
+  ws=8069
+  ((workers == 0)) || ws=8072
+  ODOO_GATEWAY_CONF=$(ql_render "$REPO/config/odoo-gateway.conf.template" - \
+    "$REPO/config/odoo-gateway.conf.render-vars" - "ODOO_WS_PORT=$ws") \
+    || ql_die 'could not render Odoo gateway configuration'
+  QL_SECRET_CHANGED=0
+  ql_secret_ensure odoo18-gateway-conf env:ODOO_GATEWAY_CONF --update
+  ODOO_GATEWAY_CONF=''
 }
 
 # odoo_check_image_account <image> <account> <uid> <gid>: fail closed unless the pinned image runs

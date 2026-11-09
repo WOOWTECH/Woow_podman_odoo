@@ -71,7 +71,8 @@ lint_local() {
   local img unit_db unit_web
   unit_db=$(sed -n 's/^Image=//p' quadlet/odoo-db.container)
   unit_web=$(sed -n 's/^Image=//p' quadlet/odoo.container)
-  grep -qxF "DB_IMAGE=$unit_db" scripts/common.sh || fail "scripts/common.sh DB_IMAGE differs from quadlet/odoo-db.container"
+  [[ $unit_db == '@@DB_IMAGE@@' ]] || fail 'quadlet/odoo-db.container must use the validated image render token'
+  unit_db=$(sed -n 's/^DB_IMAGE=//p' scripts/common.sh)
   [[ $unit_web == '@@ODOO_IMAGE@@' ]] || fail "quadlet/odoo.container must use the validated image render token"
   unit_web=$(sed -n 's/^ODOO_IMAGE=//p' scripts/common.sh)
   for img in "$unit_db" "$unit_web"; do

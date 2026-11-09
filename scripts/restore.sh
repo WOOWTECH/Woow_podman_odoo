@@ -42,7 +42,7 @@ ql_lock "$APP"
 rollback_mode=${ODOO_RESTORE_ROLLBACK:-false}
 
 stage_parent=$(mktemp -d "$BACKUP_ROOT/.restore.XXXXXX")
-mutation_started=0 pre_restore='' web_was_running=false stage=''
+mutation_started=0 pre_restore='' web_was_running=false gateway_was_running=false stage=''
 old_stores=()
 # One EXIT trap for both paths: a failure after the first database change (including a ql_die, which
 # exits) must roll the pre-restore archive back before Odoo is allowed to serve again.
@@ -56,12 +56,18 @@ cleanup() {
       if ODOO_RESTORE_ROLLBACK=true ODOO_RESTORE_MUTATED_ROLES="$stage/roles.sql" \
         "$REPO/scripts/restore.sh" --archive "$pre_restore" --confirm-restore "$APP"; then
         ql_warn "the pre-restore state is back and verified"
+        if [[ $gateway_was_running == true ]]; then
+          systemctl --user start odoo-gateway.service >/dev/null 2>&1 || ql_warn "could not start odoo-gateway.service after rollback"
+        fi
       else
         ql_warn "the rollback failed too; Odoo stays stopped so it cannot serve mixed state"
         ql_warn "recovery command: scripts/restore.sh --archive $pre_restore --confirm-restore $APP"
       fi
     elif [[ $web_was_running == true ]]; then
       systemctl --user start odoo.service >/dev/null 2>&1
+      if [[ $gateway_was_running == true ]]; then
+        systemctl --user start odoo-gateway.service >/dev/null 2>&1 || ql_warn "could not start odoo-gateway.service again"
+      fi
     fi
   fi
   podman unshare rm -rf -- "$stage_parent" >/dev/null 2>&1 || true
@@ -83,6 +89,7 @@ stage=$stage_parent/extracted
 mapfile -t dbs < <(find "$stage/databases" -maxdepth 1 -type f -name '*.dump' -printf '%f\n' 2>/dev/null | sed 's|\.dump$||' | LC_ALL=C sort || true)
 ql_info "archive holds ${#dbs[@]} database(s): ${dbs[*]:-none}"
 web_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-web 2>/dev/null || echo false)
+gateway_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-gateway 2>/dev/null || echo false)
 
 systemctl --user stop odoo.service
 [[ $(podman inspect --format '{{.State.Health.Status}}' odoo18-db 2>/dev/null) == healthy ]] \
@@ -141,6 +148,10 @@ if ((restore_secrets)); then odoo_render_conf_secret; fi
 
 systemctl --user restart odoo.service
 app_wait_healthy odoo18-web 300 odoo.service
+if [[ -f $HOME/.config/containers/systemd/odoo-gateway.container ]]; then
+  systemctl --user start odoo-gateway.service
+  app_wait_healthy odoo18-gateway 180 odoo-gateway.service
+fi
 "$REPO/tests/smoke.sh" --quick
 for old in "${old_stores[@]}"; do podman unshare rm -rf -- "$old" >/dev/null 2>&1 || true; done
 if [[ $web_was_running == false && $rollback_mode == false ]]; then

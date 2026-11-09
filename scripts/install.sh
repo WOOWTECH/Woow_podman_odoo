@@ -59,6 +59,10 @@ app_refuse_env_secrets
 default_odoo_image=$ODOO_IMAGE
 ODOO_IMAGE=$(ql_env_get WOOW_ODOO_IMAGE '')
 [[ -n $ODOO_IMAGE ]] || ODOO_IMAGE=$default_odoo_image
+default_db_image=$DB_IMAGE
+DB_IMAGE=$(ql_env_get WOOW_ODOO_DB_IMAGE '')
+[[ -n $DB_IMAGE ]] || DB_IMAGE=$default_db_image
+gateway_enabled=$(ql_env_get WOOW_ODOO_GATEWAY_ENABLED False)
 
 # ---- 3. legacy guards -------------------------------------------------------------------------
 # The compose-era variant ran as odoo18.service plus odoo18-health.timer (hand-written user units).
@@ -81,6 +85,9 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/$APP-install.XXXXXX")
 ql_cleanup work rm -rf "$WORK"
 mkdir -p "$WORK/src" "$WORK/out"
 cp -p "$REPO"/quadlet/*.container "$REPO"/quadlet/*.volume "$REPO"/quadlet/*.network "$WORK/src/"
+if [[ $gateway_enabled == True ]]; then
+  cp -p "$REPO"/quadlet/optional/odoo-gateway.container "$WORK/src/"
+fi
 RENDER_ARGS=()
 # shellcheck source=render-args.sh
 . "$REPO/scripts/render-args.sh"
@@ -97,16 +104,25 @@ done
 ql_pull_images "$WORK/out"
 if [[ $dry == 0 ]]; then
   odoo_check_image_account "$DB_IMAGE" postgres 999 999
+  odoo_check_db_volume_major "$DB_IMAGE"
   odoo_check_image_account "$ODOO_IMAGE" odoo 100 101
+  if [[ $gateway_enabled == True ]]; then
+    odoo_check_image_account "$REPO_GATEWAY_IMAGE" nginx 101 101
+  fi
 fi
 ql_secret_ensure odoo18-postgres-password random:44
 ql_secret_ensure odoo18-admin-password random:44
 restart_web=0
+restart_gateway=0
 if [[ $dry == 1 ]] && ! podman secret exists odoo18-admin-password; then
   ql_info "[dry-run] would render odoo.conf into secret odoo18-odoo-conf"
 else
   odoo_render_conf_secret
   [[ $QL_SECRET_CHANGED == 0 ]] || restart_web=1
+fi
+if [[ $gateway_enabled == True ]]; then
+  odoo_render_gateway_conf_secret
+  [[ $QL_SECRET_CHANGED == 0 ]] || restart_gateway=1
 fi
 
 # ---- 7. install changed files; start the database, then Odoo -------------------------------------
@@ -114,10 +130,12 @@ changed=$(ql_install_files "$WORK/out" "$APP" --prune)
 [[ -z $changed ]] || ql_info "changed: $(tr '\n' ' ' <<<"$changed")"
 if [[ $dry == 1 ]]; then
   ((restart_web)) && ql_info "[dry-run] would restart odoo.service (odoo.conf changed)"
+  ((restart_gateway)) && ql_info "[dry-run] would restart odoo-gateway.service (gateway conf changed)"
   ql_info "dry-run complete; nothing was changed"
   exit 0
 fi
 ((restart_web == 0)) || ql_mark_changed "$APP" odoo.service
+((restart_gateway == 0)) || ql_mark_changed "$APP" odoo-gateway.service
 if ((no_start)); then
   systemctl --user daemon-reload
   ql_info "installed; not started (--no-start). Start with: systemctl --user start odoo-db.service odoo.service"
@@ -134,6 +152,14 @@ was created with -- possibly the one this repository published before 2026-09. P
 recorded secret with: scripts/rotate-secrets.sh --db"
 ql_apply_units "$APP" odoo.service
 app_wait_healthy odoo18-web 300 odoo.service
+if [[ $gateway_enabled == True ]]; then
+  ql_apply_units "$APP" odoo-gateway.service
+  app_wait_healthy odoo18-gateway 180 odoo-gateway.service
+  gateway_host=$(app_local_host "$(ql_env_get WOOW_ODOO_GATEWAY_BIND 127.0.0.1)")
+  gateway_port=$(ql_env_get WOOW_ODOO_GATEWAY_PORT 18080)
+  ql_wait_http "http://$gateway_host:$gateway_port/nginx-health" '200' 30 \
+    || ql_die "Odoo gateway does not answer on $gateway_host:$gateway_port"
+fi
 host=$(app_local_host "$(ql_env_get WOOW_ODOO_BIND)")
 port=$(ql_env_get WOOW_ODOO_PORT)
 ql_wait_http "http://$host:$port/web/health" '200' 120 || ql_die "Odoo does not answer on $host:$port"
@@ -166,9 +192,15 @@ fi
 if ((no_smoke == 0)); then
   "$REPO/tests/smoke.sh" || ql_die "tests/smoke.sh failed; see the FAIL lines above"
 fi
+entry_url="http://$host:$port/"
+entry_note='create the first database in the database manager'
+if [[ $gateway_enabled == True ]]; then
+  entry_url="http://$gateway_host:$gateway_port/"
+  entry_note='gateway; create a database with scripts/init-db.py (database manager is blocked here)'
+fi
 cat >&2 <<EOF
 $APP is installed and healthy.
-  Odoo             http://$host:$port/   (create the first database in the database manager)
+  Odoo             $entry_url   ($entry_note)
   Master password  (private terminal) podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-password
   Addons           $addons (read-only in the container; restart odoo.service after changes)
   Settings         $ENV_FILE (edit, then run scripts/install.sh again)

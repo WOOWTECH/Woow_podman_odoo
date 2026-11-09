@@ -1,0 +1,61 @@
+# Rendered as a Podman secret. The HTTP-facing gateway belongs behind a TLS-terminating proxy.
+map $http_upgrade $woow_connection_upgrade {
+    default upgrade;
+    '' close;
+}
+map $http_x_forwarded_proto $woow_forwarded_proto {
+    default $http_x_forwarded_proto;
+    '' $scheme;
+}
+map $http_x_forwarded_proto $woow_hsts {
+    default '';
+    https 'max-age=15552000';
+}
+map $woow_forwarded_proto $woow_cookie_secure {
+    default nosecure;
+    https secure;
+}
+map $http_referer $woow_log_referer {
+    default $http_referer;
+    '~^(?<woow_ref_noargs>[^?#]*)[?#]' $woow_ref_noargs;
+}
+log_format woow_noargs '$remote_addr - [$time_local] '
+                        '"$request_method $uri $server_protocol" $status $body_bytes_sent '
+                        '"$woow_log_referer" "$http_user_agent" $request_time';
+
+server {
+    listen 8080;
+    server_name _;
+    client_max_body_size 128m;
+    access_log /dev/stdout woow_noargs;
+    # Nginx error messages can quote a full request URL including reset tokens.
+    error_log /dev/null error;
+    proxy_hide_header Strict-Transport-Security;
+    add_header Strict-Transport-Security $woow_hsts always;
+    proxy_http_version 1.1;
+    proxy_read_timeout 720s;
+    proxy_send_timeout 720s;
+    proxy_connect_timeout 720s;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $woow_forwarded_proto;
+    proxy_set_header X-Real-IP $remote_addr;
+
+    location = /nginx-health {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+    location ^~ /web/database/ { return 404; }
+    location /websocket {
+        proxy_pass http://odoo18-web:@@ODOO_WS_PORT@@;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $woow_connection_upgrade;
+        proxy_cookie_flags session_id samesite=lax $woow_cookie_secure;
+    }
+    location / {
+        proxy_pass http://odoo18-web:8069;
+        proxy_cookie_flags session_id samesite=lax $woow_cookie_secure;
+    }
+}

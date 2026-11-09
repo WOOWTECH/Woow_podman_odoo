@@ -72,6 +72,9 @@ fi
 ql_warn "upgrade failed; rolling back to the units saved in $snap/units"
 app_snapshot_restore "$snap/units" || ql_die "rollback failed: no usable snapshot. Inspect $snap and journalctl --user -u odoo.service"
 systemctl --user restart odoo-db.service odoo.service || true
+if [[ -f $HOME/.config/containers/systemd/odoo-gateway.container ]]; then
+  systemctl --user start odoo-gateway.service || true
+fi
 if ql_wait_container_healthy odoo18-web 300 && "$REPO/tests/smoke.sh" --quick; then
   ql_die "upgrade failed and was rolled back; the previous version is running again"
 fi

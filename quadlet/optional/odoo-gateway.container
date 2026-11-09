@@ -1,0 +1,30 @@
+# Optional PaaS-style public gateway. Odoo itself must remain on host loopback.
+[Unit]
+Description=Woow Odoo 18 nginx gateway
+Documentation=https://github.com/WOOWTECH/Woow_podman_odoo
+Requires=odoo.service
+After=odoo.service
+
+[Container]
+ContainerName=odoo18-gateway
+Image=docker.io/nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
+Network=odoo.network
+HostName=odoo18-gateway
+Label=io.woowtech.stack=odoo18
+PublishPort=@@ODOO_GATEWAY_PUBLISH@@:8080
+Secret=odoo18-gateway-conf,type=mount,target=/etc/nginx/conf.d/default.conf,uid=101,gid=101,mode=0400
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:8080/nginx-health
+HealthInterval=15s
+HealthTimeout=5s
+HealthRetries=8
+HealthStartPeriod=15s
+NoNewPrivileges=true
+
+[Service]
+SuccessExitStatus=143
+Restart=always
+TimeoutStartSec=180
+TimeoutStopSec=40
+
+[Install]
+WantedBy=default.target

@@ -94,6 +94,11 @@ Re-running `install.sh` is safe: with nothing changed it restarts nothing and ke
 | `WOOW_ODOO_BIND` | `127.0.0.1` | Address Odoo is published on: `127.0.0.1`, an IPv4 address of this host, or `all`. |
 | `WOOW_ODOO_PORT` | `18069` | Host port for Odoo. |
 | `WOOW_ODOO_IMAGE` | empty (the pinned official Odoo image) | Optional prebuilt Odoo image with an explicit `@sha256:` digest. Use this for a curated PaaS-compatible module image after authenticating to its registry with Podman. The image must run Odoo as uid 100, gid 101. |
+| `WOOW_ODOO_DB_IMAGE` | empty (pinned PG16 image) | Optional digest-pinned database image for a **new** instance. The installer refuses a PostgreSQL major version that differs from an existing volume's `PG_VERSION`. |
+| `WOOW_ODOO_GATEWAY_ENABLED` | `False` | Optional nginx gateway. Requires `WOOW_ODOO_BIND=127.0.0.1`; denies `/web/database/*` and omits query strings from access logs. |
+| `WOOW_ODOO_GATEWAY_BIND`, `WOOW_ODOO_GATEWAY_PORT` | `127.0.0.1`, `18080` | Address of the optional gateway; place TLS termination before it if exposed. |
+| `WOOW_ODOO_WORKERS`, `WOOW_ODOO_MAX_CRON_THREADS` | `0`, `1` | Odoo web workers and cron threads. Positive worker count enables the gateway's port 8072 WebSocket route. |
+| `WOOW_ODOO_EMAIL_FROM`, `WOOW_ODOO_SMTP_*` | empty / port `587` / TLS `True` | Optional outbound SMTP. Store an authentication password in Podman secret `odoo18-smtp-password`, never in this env file. |
 | `WOOW_ODOO_ADDONS_DIR` | `%h/.local/share/odoo18/addons` | Host directory mounted read-only at `/mnt/extra-addons`. `%h` is your home. |
 | `WOOW_ODOO_LIST_DB` | `True` | `False` hides the database manager once your databases exist. |
 | `WOOW_ODOO_DEFAULT_DB` | empty | Optional first-run database name. With `WOOW_ODOO_ADMIN_LOGIN`, the installer creates it once through local XML-RPC. |
@@ -102,7 +107,7 @@ Re-running `install.sh` is safe: with nothing changed it restarts nothing and ke
 
 Everything else (workers, memory limits, `proxy_mode`, ...) is in `config/odoo.conf.template`. Edit the
 template, then run `scripts/install.sh`: the conf secret is re-rendered and Odoo restarts.
-The config includes `/opt/woow/addons` for modules baked into a curated image and
+The config includes `/opt/woow/addons` and `/opt/woow/ha-addons` for modules baked into a curated image and
 `/mnt/extra-addons` for host modules. The stock image has no `/opt/woow/addons` directory.
 Registry credentials belong in Podman's private auth store, never in this env file.
 Automatic first-run creation requires `WOOW_ODOO_BIND=127.0.0.1` and `WOOW_ODOO_LIST_DB=True`.
@@ -113,6 +118,22 @@ For a PaaS cloud image, build from an authorized `paas-odoo-ci` checkout with it
 Set `WOOW_ODOO_IMAGE` to that digest-pinned reference. On a host with existing data, edit this setting
 before running `scripts/upgrade.sh --update-modules` so the upgrade takes its cold backup and unit
 snapshot first. The module image and its registry permissions must remain available for every start.
+
+### Fresh HA and PaaS cloud profile
+
+The [capability comparison](docs/HA_PAAS_PARITY_2026-11-10.md) records what was verified on a **fresh**
+instance. The PaaS cloud image carries 13 tenant modules. To add the seven public HA sample modules,
+build the authorized cloud image from the PaaS CI source, then use this repo's composition helper:
+
+```bash
+scripts/build-ha-cloud-image.sh <digest-pinned-cloud-image> <clean-WOOWTECH/odoo-addons-checkout-at-51856b0> localhost/woow-odoo-ha-cloud:local
+```
+
+The helper prints the local digest. Put it in `WOOW_ODOO_IMAGE` and run `scripts/install.sh` for a new
+database. Enable the gateway with `WOOW_ODOO_GATEWAY_ENABLED=True` while keeping Odoo on loopback.
+The local gateway listens on `127.0.0.1:18080` by default. This profile does **not** contain the
+PaaS platform image's 40 modules or its external `woow_paas_platform` module. Private PaaS code and
+credentials are never copied into this public repository.
 
 ### Addons and rootless permissions
 
@@ -143,6 +164,8 @@ podman exec odoo18-web odoo -c /etc/odoo/odoo.conf -d <database> -u <module> --s
 | `odoo18-postgres-password` | password of the database role `odoo` | mounted at `/run/secrets/postgres_password`; PostgreSQL reads it through `POSTGRES_PASSWORD_FILE` when the volume is initialised |
 | `odoo18-admin-password` | Odoo master (database-manager) password | not mounted; it is rendered into the conf |
 | `odoo18-odoo-conf` | the rendered `/etc/odoo/odoo.conf` | mounted read-only, owner `odoo`, mode 0400 |
+| `odoo18-gateway-conf` | optional nginx config | mounted read-only in the gateway |
+| `odoo18-smtp-password` | optional SMTP login password | rendered into the private Odoo config only when an SMTP user is configured |
 
 Rotate them with `scripts/rotate-secrets.sh --db` and/or `--admin`. `--db` changes the role password
 in PostgreSQL, replaces the secret, re-renders the conf and restarts Odoo, all without putting a
