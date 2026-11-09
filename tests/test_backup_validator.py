@@ -157,10 +157,19 @@ class RolePreparerTest(unittest.TestCase):
                   'CREATE ROLE "O\'Brien";\nALTER ROLE odoo LOGIN;\n')
         result = self.prepare(source)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.count("WHERE NOT EXISTS"), 3)
-        self.assertIn("SELECT 'CREATE ROLE \"O''Brien\"'", result.stdout)
+        self.assertEqual(result.stdout.count("IF NOT EXISTS"), 3)
+        self.assertIn("EXECUTE format('CREATE ROLE %I', 'O''Brien')", result.stdout)
         self.assertIn("rolname = 'O''Brien'", result.stdout)
         self.assertIn("ALTER ROLE odoo LOGIN", result.stdout)
+        self.assertNotIn("\\gexec", result.stdout)
+
+    def test_keeps_pg_dump_restrict_mode_without_psql_meta_commands(self):
+        source = "\\restrict dummy\nCREATE ROLE odoo;\n\\unrestrict dummy\n"
+        result = self.prepare(source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("\\restrict dummy", result.stdout)
+        self.assertIn("\\unrestrict dummy", result.stdout)
+        self.assertNotIn("\\gexec", result.stdout)
 
     def test_removes_roles_introduced_by_a_failed_restore(self):
         with tempfile.TemporaryDirectory() as d:

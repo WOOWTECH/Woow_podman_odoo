@@ -13,6 +13,12 @@ check "example mounts the default addons dir read-only" has_line example odoo.co
   'Volume=%h/.local/share/odoo18/addons:/mnt/extra-addons:ro,Z'
 check "a moved port and a custom addons dir are rendered" has_line fixture-custom odoo.container 'PublishPort=127.0.0.1:28069:8069'
 check "the custom addons dir stays read-only" has_line fixture-custom odoo.container 'Volume=%h/src/my-addons:/mnt/extra-addons:ro,Z'
+check "the default Odoo image remains pinned" has_line example odoo.container \
+  'Image=docker.io/library/odoo:18.0-20260817@sha256:259fa933bf3ee7f3e375bd74d1e0bc28bd75955159723be477359e0fdb8acf67'
+check "a digest-pinned external Odoo image renders" has_line fixture-image odoo.container \
+  'Image=docker.io/library/odoo:18.0-20260926@sha256:eea33387602b203a834d60eee027fcc0d9fcdfd47e310a2d1740ea82322445d7'
+check "a valid first-run bootstrap configuration renders" has_line fixture-bootstrap odoo.container \
+  'PublishPort=127.0.0.1:18069:8069'
 check "BIND=all omits the host address" has_line fixture-lan odoo.container 'PublishPort=18069:8069'
 check "the database publishes no port" bash -c "! grep -q '^PublishPort=' '$WORK/example/out/odoo-db.container'"
 check "no unit is named odoo18 (a legacy odoo18.service would shadow it)" \
@@ -28,6 +34,8 @@ check "odoo.conf.template renders" test -n "$conf"
 check "the rendered conf carries the database password" grep -qx 'db_password = db-dummy' <<<"$conf"
 check "the rendered conf carries the master password" grep -qx 'admin_passwd = admin-dummy' <<<"$conf"
 check "the conf points at the Quadlet database container" grep -qx 'db_host = odoo18-db' <<<"$conf"
+check "the conf includes curated image and host addons" grep -qx \
+  'addons_path = /usr/lib/python3/dist-packages/odoo/addons,/opt/woow/addons,/mnt/extra-addons' <<<"$conf"
 check "no default master password in the template" bash -c "! grep -qE '^admin_passwd *= *admin *\$' '$REPO/config/odoo.conf.template'"
 
 # Invalid knobs must stop the render before any file is written.
@@ -47,3 +55,7 @@ reject "an addons dir with a Volume option separator" WOOW_ODOO_ADDONS_DIR '%h/a
 reject "a relative addons dir" WOOW_ODOO_ADDONS_DIR 'addons'
 reject "an addons dir with '..'" WOOW_ODOO_ADDONS_DIR '%h/../etc'
 reject "a list_db value other than True/False" WOOW_ODOO_LIST_DB yes
+reject "an unpinned Odoo image" WOOW_ODOO_IMAGE 'docker.io/library/odoo:18.0'
+reject "an Odoo image containing a unit separator" WOOW_ODOO_IMAGE 'docker.io/library/odoo:18.0;ExecStart=evil'
+reject "a database name with a quote" WOOW_ODOO_DEFAULT_DB "odoo'bad"
+reject "an admin login without a database" WOOW_ODOO_ADMIN_LOGIN 'operator@example.invalid'

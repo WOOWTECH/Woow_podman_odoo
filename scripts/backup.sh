@@ -37,6 +37,11 @@ ql_lock "$APP"
 [[ $(podman inspect --format '{{.State.Health.Status}}' odoo18-db 2>/dev/null) == healthy ]] \
   || ql_die "odoo18-db is not healthy; refusing to back up"
 web_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-web 2>/dev/null || echo false)
+actual_odoo_image=$(podman inspect --format '{{.ImageName}}' odoo18-web 2>/dev/null || true)
+if [[ $actual_odoo_image != *@sha256:* ]]; then
+  actual_odoo_image=$(sed -n 's/^Image=//p' "$HOME/.config/containers/systemd/odoo.container" 2>/dev/null || true)
+fi
+[[ $actual_odoo_image == *@sha256:* ]] || ql_die "cannot read the deployed Odoo image for backup metadata"
 (umask 077 && mkdir -p -- "$BACKUP_ROOT") || ql_die "cannot create $BACKUP_ROOT"
 chmod 700 "$BACKUP_ROOT"
 staging=$(mktemp -d "$BACKUP_ROOT/.backup.XXXXXX")
@@ -93,7 +98,7 @@ dblist=${dblist%,}
 secrets_json=false
 ((include_secrets == 0)) || secrets_json=true
 printf '{"project":"odoo18","created_utc":"%s","databases":[%s],"images":{"odoo":"%s","database":"%s"},"secrets_included":%s}\n' \
-  "$stamp" "$dblist" "$ODOO_IMAGE" "$DB_IMAGE" "$secrets_json" >"$root/metadata.json"
+  "$stamp" "$dblist" "$actual_odoo_image" "$DB_IMAGE" "$secrets_json" >"$root/metadata.json"
 
 podman unshare bash -c 'cd "$1"; find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | while IFS= read -r -d "" f; do sha256sum "${f#./}"; done >SHA256SUMS' sh "$root"
 podman unshare find "$root" -type d -exec chmod 700 {} +

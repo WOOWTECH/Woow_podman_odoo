@@ -2,6 +2,24 @@
 # scripts/odoo-helpers.sh: Odoo-specific helpers, sourced after scripts/common.sh. Every function
 # that handles a password keeps it in shell variables and pipes; none of them prints one.
 
+# Podman system reset can remove resources while their generated systemd oneshot units still show
+# active. Restart only such stale units; inactive dependencies are started by the normal unit path.
+odoo_reconcile_resources() {
+  local kind name unit spec
+  for spec in \
+    network:odoo18-network:odoo-network.service \
+    volume:odoo18-db-data:odoo-db-data-volume.service \
+    volume:odoo18-web-data:odoo-web-data-volume.service; do
+    IFS=: read -r kind name unit <<<"$spec"
+    if podman "$kind" exists "$name" >/dev/null 2>&1; then continue; fi
+    if systemctl --user is-active --quiet "$unit"; then
+      ql_info "$name is missing while $unit is active; recreating it"
+      systemctl --user restart "$unit" || ql_die "cannot restart $unit"
+      podman "$kind" exists "$name" >/dev/null 2>&1 || ql_die "$unit did not recreate $name"
+    fi
+  done
+}
+
 # odoo_render_conf_secret: render config/odoo.conf.template with both passwords and WOOW_ODOO_LIST_DB
 # and store the result as the odoo18-odoo-conf secret (replaced only when it differs). Sets
 # QL_SECRET_CHANGED=1 when it changed, so the caller restarts odoo.service.

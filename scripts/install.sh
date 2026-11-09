@@ -56,6 +56,9 @@ fi
 app_env_load
 app_env_overlay "${sets[@]}"
 app_refuse_env_secrets
+default_odoo_image=$ODOO_IMAGE
+ODOO_IMAGE=$(ql_env_get WOOW_ODOO_IMAGE '')
+[[ -n $ODOO_IMAGE ]] || ODOO_IMAGE=$default_odoo_image
 
 # ---- 3. legacy guards -------------------------------------------------------------------------
 # The compose-era variant ran as odoo18.service plus odoo18-health.timer (hand-written user units).
@@ -120,6 +123,8 @@ if ((no_start)); then
   ql_info "installed; not started (--no-start). Start with: systemctl --user start odoo-db.service odoo.service"
   exit 0
 fi
+systemctl --user daemon-reload
+odoo_reconcile_resources
 ql_apply_units "$APP" odoo-db.service
 app_wait_healthy odoo18-db 180 odoo-db.service
 odoo_check_db_password || ql_die "the database role odoo does not accept the password in the
@@ -132,6 +137,30 @@ app_wait_healthy odoo18-web 300 odoo.service
 host=$(app_local_host "$(ql_env_get WOOW_ODOO_BIND)")
 port=$(ql_env_get WOOW_ODOO_PORT)
 ql_wait_http "http://$host:$port/web/health" '200' 120 || ql_die "Odoo does not answer on $host:$port"
+
+# Optional first-run bootstrap. Never re-run -i base on an existing database: it can reset
+# noupdate records such as the first administrator. A partial database fails loudly.
+default_db=$(ql_env_get WOOW_ODOO_DEFAULT_DB '')
+if [[ -n $default_db ]]; then
+  dbs=$(odoo_databases) || ql_die "cannot list Odoo databases before bootstrap"
+  if grep -qxF "$default_db" <<<"$dbs"; then
+    installed=$(podman exec odoo18-db psql -X -U odoo -d "$default_db" -Atc \
+      "SELECT string_agg(name || ':' || state, ',' ORDER BY name) FROM ir_module_module WHERE name IN ('base','web')" 2>/dev/null) \
+      || ql_die "$default_db exists but its module state cannot be read; refusing to initialize it again"
+    [[ $installed == 'base:installed,web:installed' ]] \
+      || ql_die "$default_db exists but base/web are not fully installed ($installed); manual recovery is required"
+    ql_info "database $default_db already initialized (kept)"
+  else
+    [[ $(ql_env_get WOOW_ODOO_BIND) == 127.0.0.1 ]] \
+      || ql_die "first-run database bootstrap requires loopback binding; change WOOW_ODOO_BIND after initialization"
+    [[ $(ql_env_get WOOW_ODOO_LIST_DB) == True ]] \
+      || ql_die "first-run database bootstrap requires WOOW_ODOO_LIST_DB=True"
+    "$REPO/scripts/init-db.py" --database "$default_db" \
+      --admin-login "$(ql_env_get WOOW_ODOO_ADMIN_LOGIN)" \
+      --lang "$(ql_env_get WOOW_ODOO_LANG zh_TW)" --url "http://127.0.0.1:$port" \
+      || ql_die "database bootstrap failed; inspect the database before retrying"
+  fi
+fi
 
 # ---- 8. smoke ---------------------------------------------------------------------------------------
 if ((no_smoke == 0)); then

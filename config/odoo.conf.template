@@ -3,7 +3,9 @@
 ; at /etc/odoo/odoo.conf (uid 100, mode 0400). The tokens are filled from the odoo18-postgres-password
 ; and odoo18-admin-password secrets and from ~/.config/odoo18/odoo18.env; config/odoo.conf.render-vars
 ; lists them. The rendered file only ever exists inside podman's secret store. Never commit one.
-addons_path = /mnt/extra-addons
+; Prebuilt PaaS-compatible images place curated modules in /opt/woow/addons. The directory is
+; absent from the stock image; Odoo ignores that missing path while keeping the host addons mount.
+addons_path = /usr/lib/python3/dist-packages/odoo/addons,/opt/woow/addons,/mnt/extra-addons
 data_dir = /var/lib/odoo
 db_host = odoo18-db
 db_port = 5432
@@ -12,6 +14,9 @@ db_password = @@POSTGRES_PASSWORD@@
 admin_passwd = @@ODOO_ADMIN_PASSWORD@@
 list_db = @@WOOW_ODOO_LIST_DB@@
 log_level = info
+; Odoo's werkzeug INFO access lines include reset/signup tokens in query strings.
+; Follow the PaaS Odoo 0.2.16 default: keep errors, omit those request lines.
+log_handler = werkzeug:WARNING
 workers = 0
 max_cron_threads = 1
 limit_memory_hard = 2684354560

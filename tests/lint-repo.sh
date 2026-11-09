@@ -72,7 +72,8 @@ lint_local() {
   unit_db=$(sed -n 's/^Image=//p' quadlet/odoo-db.container)
   unit_web=$(sed -n 's/^Image=//p' quadlet/odoo.container)
   grep -qxF "DB_IMAGE=$unit_db" scripts/common.sh || fail "scripts/common.sh DB_IMAGE differs from quadlet/odoo-db.container"
-  grep -qxF "ODOO_IMAGE=$unit_web" scripts/common.sh || fail "scripts/common.sh ODOO_IMAGE differs from quadlet/odoo.container"
+  [[ $unit_web == '@@ODOO_IMAGE@@' ]] || fail "quadlet/odoo.container must use the validated image render token"
+  unit_web=$(sed -n 's/^ODOO_IMAGE=//p' scripts/common.sh)
   for img in "$unit_db" "$unit_web"; do
     [[ $img == *@sha256:* ]] || fail "image not pinned by digest: $img"
   done

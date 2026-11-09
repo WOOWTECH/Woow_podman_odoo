@@ -70,6 +70,11 @@ master password is the `odoo18-admin-password` secret:
 podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-password
 ```
 
+For a fresh database with a generated administrator password held in a separate Podman secret,
+use `scripts/init-db.py --database my_odoo --admin-login me@example.com --lang zh_TW` after Odoo is
+healthy. It refuses to initialize an existing database. Its success message prints the command to
+retrieve the login password in a private terminal.
+
 Useful options:
 
 | Option | Effect |
@@ -88,11 +93,26 @@ Re-running `install.sh` is safe: with nothing changed it restarts nothing and ke
 |---|---|---|
 | `WOOW_ODOO_BIND` | `127.0.0.1` | Address Odoo is published on: `127.0.0.1`, an IPv4 address of this host, or `all`. |
 | `WOOW_ODOO_PORT` | `18069` | Host port for Odoo. |
+| `WOOW_ODOO_IMAGE` | empty (the pinned official Odoo image) | Optional prebuilt Odoo image with an explicit `@sha256:` digest. Use this for a curated PaaS-compatible module image after authenticating to its registry with Podman. The image must run Odoo as uid 100, gid 101. |
 | `WOOW_ODOO_ADDONS_DIR` | `%h/.local/share/odoo18/addons` | Host directory mounted read-only at `/mnt/extra-addons`. `%h` is your home. |
 | `WOOW_ODOO_LIST_DB` | `True` | `False` hides the database manager once your databases exist. |
+| `WOOW_ODOO_DEFAULT_DB` | empty | Optional first-run database name. With `WOOW_ODOO_ADMIN_LOGIN`, the installer creates it once through local XML-RPC. |
+| `WOOW_ODOO_ADMIN_LOGIN` | empty | First administrator login for `WOOW_ODOO_DEFAULT_DB`; its generated password is a Podman secret. |
+| `WOOW_ODOO_LANG` | `zh_TW` | Language for first-run database creation. |
 
 Everything else (workers, memory limits, `proxy_mode`, ...) is in `config/odoo.conf.template`. Edit the
 template, then run `scripts/install.sh`: the conf secret is re-rendered and Odoo restarts.
+The config includes `/opt/woow/addons` for modules baked into a curated image and
+`/mnt/extra-addons` for host modules. The stock image has no `/opt/woow/addons` directory.
+Registry credentials belong in Podman's private auth store, never in this env file.
+Automatic first-run creation requires `WOOW_ODOO_BIND=127.0.0.1` and `WOOW_ODOO_LIST_DB=True`.
+The installer keeps an existing initialized database and stops if it finds a partial one; it never
+reinitializes an existing database. After setup, you may hide the manager with `WOOW_ODOO_LIST_DB=False`.
+For a PaaS cloud image, build from an authorized `paas-odoo-ci` checkout with its
+`Dockerfile.cloud`; obtain its digest with `podman image inspect IMAGE --format '{{index .RepoDigests 0}}'`.
+Set `WOOW_ODOO_IMAGE` to that digest-pinned reference. On a host with existing data, edit this setting
+before running `scripts/upgrade.sh --update-modules` so the upgrade takes its cold backup and unit
+snapshot first. The module image and its registry permissions must remain available for every start.
 
 ### Addons and rootless permissions
 

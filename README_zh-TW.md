@@ -65,6 +65,10 @@ scripts/install.sh                # 產生單元、驗證、拉映像、檢查�
 podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-password
 ```
 
+若要產生隨機的首位管理員密碼並保存在另一個 Podman secret，可在 Odoo 健康後執行
+`scripts/init-db.py --database my_odoo --admin-login me@example.com --lang zh_TW`。腳本拒絕重新初始化既有資料庫，
+成功時會印出在私人終端讀取登入密碼的指令。
+
 常用選項：
 
 | 選項 | 作用 |
@@ -83,11 +87,21 @@ podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-passw
 |---|---|---|
 | `WOOW_ODOO_BIND` | `127.0.0.1` | Odoo 發布的位址：`127.0.0.1`、本機某個 IPv4 位址，或 `all`。 |
 | `WOOW_ODOO_PORT` | `18069` | Odoo 的主機埠。 |
+| `WOOW_ODOO_IMAGE` | 空值（預設釘版官方映像） | 可選用附 `@sha256:` digest 的預建 Odoo 映像，供已驗證的 PaaS 模組組合使用；映像須以 uid 100、gid 101 執行 Odoo。私有 registry 先用 Podman 登入，憑證不要寫入此檔。 |
 | `WOOW_ODOO_ADDONS_DIR` | `%h/.local/share/odoo18/addons` | 以唯讀掛載到 `/mnt/extra-addons` 的主機目錄；`%h` 是你的家目錄。 |
 | `WOOW_ODOO_LIST_DB` | `True` | 資料庫建立完成後可設為 `False` 隱藏資料庫管理介面。 |
+| `WOOW_ODOO_DEFAULT_DB` | 空值 | 可選首次自動建立的資料庫名稱；需與 `WOOW_ODOO_ADMIN_LOGIN` 一起設定。 |
+| `WOOW_ODOO_ADMIN_LOGIN` | 空值 | 首位管理員登入名，隨機密碼存入 Podman secret。 |
+| `WOOW_ODOO_LANG` | `zh_TW` | 首次建庫語言。 |
 
 其他設定（workers、記憶體上限、`proxy_mode` 等）在 `config/odoo.conf.template`。編輯樣板後執行
 `scripts/install.sh`，conf secret 會重新算出並重啟 Odoo。
+模組路徑同時包含映像內的 `/opt/woow/addons` 與主機唯讀掛載的 `/mnt/extra-addons`；預設官方映像沒有前者。
+首次自動建庫只接受 `WOOW_ODOO_BIND=127.0.0.1`、`WOOW_ODOO_LIST_DB=True`。安裝器會保留已完成初始化的資料庫，
+遇到不完整的資料庫則停止，避免重跑 `-i base` 覆蓋既有管理員資料；建庫後可把 `WOOW_ODOO_LIST_DB` 改為 `False`。
+PaaS cloud 映像應從有權限的 `paas-odoo-ci` 原始碼及 `Dockerfile.cloud` 建置，透過
+`podman image inspect IMAGE --format '{{index .RepoDigests 0}}'` 取 digest 後填入 `WOOW_ODOO_IMAGE`。
+若主機已有資料，先改這個設定再執行 `scripts/upgrade.sh --update-modules`，讓升級先做冷備份與單元快照。
 
 ### Addons 與 rootless 權限
 
