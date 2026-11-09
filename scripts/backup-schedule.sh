@@ -15,6 +15,8 @@ case ${1:-} in
     [[ $REPO =~ ^/[A-Za-z0-9/._+-]+$ ]] || { echo "Repository path contains characters unsafe for a systemd ExecStart: $REPO" >&2; exit 1; }
     systemctl --user is-active --quiet odoo-db.service \
       || { echo 'Start the Odoo database before enabling scheduled backups' >&2; exit 1; }
+    [[ $(podman inspect --format '{{.State.Health.Status}}' odoo18-db 2>/dev/null) == healthy ]] \
+      || { echo 'Wait for a healthy Odoo database before enabling scheduled backups' >&2; exit 1; }
     for unit in "$service" "$timer"; do
       if [[ -e $unit && $(head -n 1 "$unit") != "$marker" ]]; then
         echo "Refusing to replace an unmanaged unit: $unit" >&2

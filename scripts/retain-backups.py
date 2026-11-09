@@ -35,6 +35,8 @@ def inventory(directory: Path) -> list[tuple[datetime, Path]]:
         sidecar = path.with_name(path.name + ".sha256")
         if path.is_symlink() or not path.is_file() or sidecar.is_symlink() or not sidecar.is_file():
             raise ValueError(f"missing or unsafe backup/checksum pair: {path.name}")
+        if sidecar.stat().st_size > 200:
+            raise ValueError(f"oversized backup checksum: {path.name}")
         line = sidecar.read_text(encoding="ascii")
         checksum = CHECKSUM.fullmatch(line)
         if not checksum or checksum.group(2) != path.name or sha256(path) != checksum.group(1):
