@@ -92,6 +92,8 @@ podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-passw
 | `WOOW_ODOO_GATEWAY_ENABLED` | `False` | 可選 nginx 入口；啟用時 Odoo 必須綁 `127.0.0.1`，入口封鎖 `/web/database/*` 並略去 access log 的查詢字串。 |
 | `WOOW_ODOO_GATEWAY_BIND`、`WOOW_ODOO_GATEWAY_PORT` | `127.0.0.1`、`18080` | 可選入口位址與埠；對外服務時先接 TLS 終止層。 |
 | `WOOW_ODOO_WORKERS`、`WOOW_ODOO_MAX_CRON_THREADS` | `0`、`1` | 網頁 worker 及排程執行緒；worker > 0 時入口將 WebSocket 轉到 8072。 |
+| `WOOW_ODOO_DB_MAXCONN`、`WOOW_ODOO_LIMIT_TIME_*`、`WOOW_ODOO_LIMIT_REQUEST` | 一般預設見設定範例 | 資料庫連線池與請求／排程時間上限；釘版租戶配置帶 PaaS tenant 值。 |
+| `WOOW_ODOO_DB_FILTER` | 空值 | 首次建庫後可設單一資料庫篩選，例如 `^odoo$`。 |
 | `WOOW_ODOO_EMAIL_FROM`、`WOOW_ODOO_SMTP_*` | 空值／埠 `587`／TLS `True` | 可選寄信設定；登入密碼放 Podman secret `odoo18-smtp-password`，不可寫入此設定檔。 |
 | `WOOW_ODOO_ADDONS_DIR` | `%h/.local/share/odoo18/addons` | 以唯讀掛載到 `/mnt/extra-addons` 的主機目錄；`%h` 是你的家目錄。 |
 | `WOOW_ODOO_LIST_DB` | `True` | 資料庫建立完成後可設為 `False` 隱藏資料庫管理介面。 |
@@ -110,7 +112,7 @@ PaaS cloud 映像應從有權限的 `paas-odoo-ci` 原始碼及 `Dockerfile.clou
 
 ### 全新 HA 與 PaaS cloud 模組組合
 
-[功能對照紀錄](docs/HA_PAAS_PARITY_2026-11-10.md) 說明全新實例的實測與尚未對齊之處。PaaS cloud 映像有 13 顆 tenant 模組；若要再加入公開 HA 的 7 顆範例模組，先從有權限的 PaaS CI 原始碼建 cloud 映像，再執行：
+[功能對照紀錄](docs/HA_PAAS_PARITY_2026-11-10.md) 說明全新實例的實測與尚未對齊之處。PaaS 租戶範本釘住 chart `0.2.26`、cloud 映像 `20261101.1152`、PG17.11；取得 JCR 授權後，應在全新空資料卷使用[釘版配置](config/profiles/tenant-cloud.profile)。目前本機候選映像依較新的 CI main 快照建置，有 13 顆模組，**並非**租戶範本釘定的映像。若要再加入公開 HA 的 7 顆範例模組，以有權限的 cloud 映像為底層執行：
 
 ```bash
 scripts/build-ha-cloud-image.sh <帶-digest-的-cloud-映像> <固定-51856b0-且乾淨的-odoo-addons-checkout> localhost/woow-odoo-ha-cloud:local

@@ -5,7 +5,7 @@
 # render_args <envfile>: QL_ENV is already loaded from <envfile>; sets RENDER_ARGS=(KEY=VALUE...).
 # It also validates the values that are rendered straight from the env file, and dies on a bad one.
 render_args() {
-  local bind port addons prefix image db login lang gateway gateway_bind gateway_port workers cron smtp_port db_image
+  local bind port addons prefix image db login lang gateway gateway_bind gateway_port workers cron smtp_port db_image db_filter value key
   bind=$(ql_env_get WOOW_ODOO_BIND)
   ql_assert_match WOOW_ODOO_BIND "$bind" 'all|[0-9]{1,3}(\.[0-9]{1,3}){3}'
   port=$(ql_env_get WOOW_ODOO_PORT)
@@ -23,6 +23,24 @@ render_args() {
   ql_assert_match WOOW_ODOO_WORKERS "$workers" '0|[1-9][0-9]?'
   ql_assert_match WOOW_ODOO_MAX_CRON_THREADS "$cron" '0|[1-9][0-9]?'
   ((workers <= 16 && cron <= 16)) || ql_die 'workers/cron threads must be 0..16'
+  for key in WOOW_ODOO_DB_MAXCONN WOOW_ODOO_LIMIT_TIME_CPU WOOW_ODOO_LIMIT_TIME_REAL WOOW_ODOO_LIMIT_REQUEST; do
+    value=$(ql_env_get "$key" '')
+    [[ -n $value ]] || case $key in
+      WOOW_ODOO_DB_MAXCONN) value=64 ;;
+      WOOW_ODOO_LIMIT_TIME_CPU) value=600 ;;
+      WOOW_ODOO_LIMIT_TIME_REAL) value=1200 ;;
+      WOOW_ODOO_LIMIT_REQUEST) value=65536 ;;
+    esac
+    ql_assert_match "$key" "$value" '[1-9][0-9]{0,6}'
+    ((value <= 1000000)) || ql_die "$key exceeds 1000000"
+  done
+  value=$(ql_env_get WOOW_ODOO_LIMIT_TIME_REAL_CRON -1)
+  ql_assert_match WOOW_ODOO_LIMIT_TIME_REAL_CRON "$value" '-1|[1-9][0-9]{0,6}'
+  [[ $value == -1 ]] || ((value <= 1000000)) || ql_die 'cron time limit exceeds 1000000'
+  db_filter=$(ql_env_get WOOW_ODOO_DB_FILTER '')
+  if [[ -n $db_filter ]]; then
+    ql_assert_match WOOW_ODOO_DB_FILTER "$db_filter" '\^[a-z][a-z0-9_]{0,62}\$'
+  fi
   ql_assert_match WOOW_ODOO_EMAIL_FROM "$(ql_env_get WOOW_ODOO_EMAIL_FROM '')" '[A-Za-z0-9_.+@-]*'
   ql_assert_match WOOW_ODOO_SMTP_SERVER "$(ql_env_get WOOW_ODOO_SMTP_SERVER '')" '[A-Za-z0-9.-]*'
   ql_assert_match WOOW_ODOO_SMTP_USER "$(ql_env_get WOOW_ODOO_SMTP_USER '')" '[A-Za-z0-9_.+@-]*'

@@ -8,6 +8,9 @@ check() { # check <description> <command...>
 }
 has_line() { grep -qxF -- "$3" "$WORK/$1/out/$2"; }
 
+run_variant tenant-pinned "$REPO/config/profiles/tenant-cloud.profile" "${base[@]}" \
+  "$REPO/quadlet/optional/odoo-gateway.container"
+
 check "example publishes Odoo on 127.0.0.1:18069" has_line example odoo.container 'PublishPort=127.0.0.1:18069:8069'
 check "example mounts the default addons dir read-only" has_line example odoo.container \
   'Volume=%h/.local/share/odoo18/addons:/mnt/extra-addons:ro,Z'
@@ -25,6 +28,10 @@ check "a valid first-run bootstrap configuration renders" has_line fixture-boots
   'PublishPort=127.0.0.1:18069:8069'
 check "BIND=all omits the host address" has_line fixture-lan odoo.container 'PublishPort=18069:8069'
 check "optional gateway binds on loopback" has_line example+optional odoo-gateway.container 'PublishPort=127.0.0.1:18080:8080'
+check "tenant profile pins the published cloud image" has_line tenant-pinned odoo.container \
+  'Image=jcr-prod.woowtech.io/woow-paas-docker-local/cloud-odoo:20261101.1152@sha256:5a0c0f9bed994688230b0d4869ab7f442381f2953149133842bb16065ed37316'
+check "tenant profile pins the published PG17 image" has_line tenant-pinned odoo-db.container \
+  'Image=jcr-prod.woowtech.io/woow-paas-docker-local/paas-postgres:17.11-20260928.1549@sha256:dbd1fed8882043f45bf759e8f7c73092505ef0afef7a23a93b177e6f7c2c840f'
 check "the database publishes no port" bash -c "! grep -q '^PublishPort=' '$WORK/example/out/odoo-db.container'"
 check "no unit is named odoo18 (a legacy odoo18.service would shadow it)" \
   bash -c "! ls '$REPO'/quadlet | grep -qE '^odoo18\\.(container|service)$'"
@@ -33,7 +40,10 @@ check "no unit is named odoo18 (a legacy odoo18.service would shadow it)" \
 conf_render() {
   ql_render "$REPO/config/odoo.conf.template" - "$REPO/config/odoo.conf.render-vars" - \
     POSTGRES_PASSWORD=db-dummy ODOO_ADMIN_PASSWORD=admin-dummy WOOW_ODOO_LIST_DB=True \
-    WOOW_ODOO_WORKERS=2 WOOW_ODOO_MAX_CRON_THREADS=2 SMTP_LINES=''
+    WOOW_ODOO_WORKERS=2 WOOW_ODOO_MAX_CRON_THREADS=2 WOOW_ODOO_DB_MAXCONN=8 \
+    WOOW_ODOO_LIMIT_TIME_CPU=60 WOOW_ODOO_LIMIT_TIME_REAL=120 \
+    WOOW_ODOO_LIMIT_TIME_REAL_CRON=600 WOOW_ODOO_LIMIT_REQUEST=65536 \
+    DB_FILTER_LINE='dbfilter = ^odoo$' SMTP_LINES=''
 }
 conf=$( (conf_render) 2>/dev/null) || conf=''
 check "odoo.conf.template renders" test -n "$conf"
@@ -43,6 +53,7 @@ check "the conf points at the Quadlet database container" grep -qx 'db_host = od
 check "the conf includes curated image and host addons" grep -qx \
   'addons_path = /usr/lib/python3/dist-packages/odoo/addons,/opt/woow/addons,/opt/woow/ha-addons,/mnt/extra-addons' <<<"$conf"
 check "worker and cron counts render" bash -c "grep -qx 'workers = 2' <<<\"\$1\" && grep -qx 'max_cron_threads = 2' <<<\"\$1\"" _ "$conf"
+check "tenant database and timeout limits render" bash -c "grep -Fqx 'dbfilter = ^odoo$' <<<\"\$1\" && grep -Fqx 'db_maxconn = 8' <<<\"\$1\" && grep -Fqx 'limit_time_real_cron = 600' <<<\"\$1\"" _ "$conf"
 check "SMTP is absent until configured" bash -c "! grep -q '^smtp_' <<<\"\$1\"" _ "$conf"
 check "no default master password in the template" bash -c "! grep -qE '^admin_passwd *= *admin *\$' '$REPO/config/odoo.conf.template'"
 
@@ -69,6 +80,8 @@ reject "an Odoo image containing a unit separator" WOOW_ODOO_IMAGE 'docker.io/li
 reject "a database name with a quote" WOOW_ODOO_DEFAULT_DB "odoo'bad"
 reject "an admin login without a database" WOOW_ODOO_ADMIN_LOGIN 'operator@example.invalid'
 reject "too many workers" WOOW_ODOO_WORKERS 17
+reject "an unsafe database filter" WOOW_ODOO_DB_FILTER '.*'
+reject "an invalid database pool size" WOOW_ODOO_DB_MAXCONN 0
 reject "SMTP server config injection" WOOW_ODOO_SMTP_SERVER 'host;password=bad'
 reject "SMTP port overflow" WOOW_ODOO_SMTP_PORT 70000
 gateway_bad=$WORK/bad-gateway-bypass.env

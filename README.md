@@ -98,6 +98,8 @@ Re-running `install.sh` is safe: with nothing changed it restarts nothing and ke
 | `WOOW_ODOO_GATEWAY_ENABLED` | `False` | Optional nginx gateway. Requires `WOOW_ODOO_BIND=127.0.0.1`; denies `/web/database/*` and omits query strings from access logs. |
 | `WOOW_ODOO_GATEWAY_BIND`, `WOOW_ODOO_GATEWAY_PORT` | `127.0.0.1`, `18080` | Address of the optional gateway; place TLS termination before it if exposed. |
 | `WOOW_ODOO_WORKERS`, `WOOW_ODOO_MAX_CRON_THREADS` | `0`, `1` | Odoo web workers and cron threads. Positive worker count enables the gateway's port 8072 WebSocket route. |
+| `WOOW_ODOO_DB_MAXCONN`, `WOOW_ODOO_LIMIT_TIME_*`, `WOOW_ODOO_LIMIT_REQUEST` | generic defaults in the example env | Database connection pool and Odoo request/cron time limits. The pinned tenant profile sets the PaaS tenant values. |
+| `WOOW_ODOO_DB_FILTER` | empty | Optional anchored single-database filter such as `^odoo$`; set after first-run creation. |
 | `WOOW_ODOO_EMAIL_FROM`, `WOOW_ODOO_SMTP_*` | empty / port `587` / TLS `True` | Optional outbound SMTP. Store an authentication password in Podman secret `odoo18-smtp-password`, never in this env file. |
 | `WOOW_ODOO_ADDONS_DIR` | `%h/.local/share/odoo18/addons` | Host directory mounted read-only at `/mnt/extra-addons`. `%h` is your home. |
 | `WOOW_ODOO_LIST_DB` | `True` | `False` hides the database manager once your databases exist. |
@@ -122,8 +124,11 @@ snapshot first. The module image and its registry permissions must remain availa
 ### Fresh HA and PaaS cloud profile
 
 The [capability comparison](docs/HA_PAAS_PARITY_2026-11-10.md) records what was verified on a **fresh**
-instance. The PaaS cloud image carries 13 tenant modules. To add the seven public HA sample modules,
-build the authorized cloud image from the PaaS CI source, then use this repo's composition helper:
+instance. The PaaS tenant template pins chart `0.2.26`, cloud image `20261101.1152` and PG17.11;
+use [the pinned profile](config/profiles/tenant-cloud.profile) on a new empty instance after obtaining
+JCR access. The local candidate was built from a later CI main snapshot with 13 addons, so it is
+**not** the pinned tenant image. To add the seven public HA sample modules to an authorized cloud
+image, use this repo's composition helper:
 
 ```bash
 scripts/build-ha-cloud-image.sh <digest-pinned-cloud-image> <clean-WOOWTECH/odoo-addons-checkout-at-51856b0> localhost/woow-odoo-ha-cloud:local

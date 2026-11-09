@@ -43,13 +43,17 @@ odoo_check_db_volume_major() {
 # and store the result as the odoo18-odoo-conf secret (replaced only when it differs). Sets
 # QL_SECRET_CHANGED=1 when it changed, so the caller restarts odoo.service.
 odoo_render_conf_secret() {
-  local xt=0 db admin list workers cron smtp_lines smtp_server smtp_user smtp_password ODOO_CONF
+  local xt=0 db admin list workers cron db_filter_line smtp_lines smtp_server smtp_user smtp_password ODOO_CONF
   [[ $- == *x* ]] && xt=1 && set +x
   db=$(app_secret_read odoo18-postgres-password || true)
   admin=$(app_secret_read odoo18-admin-password || true)
   list=$(ql_env_get WOOW_ODOO_LIST_DB True)
   workers=$(ql_env_get WOOW_ODOO_WORKERS 0)
   cron=$(ql_env_get WOOW_ODOO_MAX_CRON_THREADS 1)
+  db_filter_line=''
+  if [[ -n $(ql_env_get WOOW_ODOO_DB_FILTER '') ]]; then
+    db_filter_line="dbfilter = $(ql_env_get WOOW_ODOO_DB_FILTER)"
+  fi
   smtp_lines=''
   if [[ -n $(ql_env_get WOOW_ODOO_EMAIL_FROM '') ]]; then
     smtp_lines+="email_from = $(ql_env_get WOOW_ODOO_EMAIL_FROM)"$'\n'
@@ -78,6 +82,12 @@ odoo_render_conf_secret() {
   ODOO_CONF=$(ql_render "$REPO/config/odoo.conf.template" - "$REPO/config/odoo.conf.render-vars" - \
     "POSTGRES_PASSWORD=$db" "ODOO_ADMIN_PASSWORD=$admin" "WOOW_ODOO_LIST_DB=$list" \
     "WOOW_ODOO_WORKERS=$workers" "WOOW_ODOO_MAX_CRON_THREADS=$cron" \
+    "WOOW_ODOO_DB_MAXCONN=$(ql_env_get WOOW_ODOO_DB_MAXCONN 64)" \
+    "WOOW_ODOO_LIMIT_TIME_CPU=$(ql_env_get WOOW_ODOO_LIMIT_TIME_CPU 600)" \
+    "WOOW_ODOO_LIMIT_TIME_REAL=$(ql_env_get WOOW_ODOO_LIMIT_TIME_REAL 1200)" \
+    "WOOW_ODOO_LIMIT_TIME_REAL_CRON=$(ql_env_get WOOW_ODOO_LIMIT_TIME_REAL_CRON -1)" \
+    "WOOW_ODOO_LIMIT_REQUEST=$(ql_env_get WOOW_ODOO_LIMIT_REQUEST 65536)" \
+    "DB_FILTER_LINE=$db_filter_line" \
     "SMTP_LINES=$smtp_lines") || ODOO_CONF=''
   smtp_lines=''
   db='' admin=''

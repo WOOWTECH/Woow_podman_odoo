@@ -13,15 +13,19 @@ db_user = odoo
 db_password = @@POSTGRES_PASSWORD@@
 admin_passwd = @@ODOO_ADMIN_PASSWORD@@
 list_db = @@WOOW_ODOO_LIST_DB@@
+@@DB_FILTER_LINE@@
 log_level = info
 ; Both werkzeug and the port 8072 longpolling logger include query strings in INFO request lines.
 ; Keep warnings/errors while omitting reset/signup/WebSocket request tokens.
 log_handler = werkzeug:WARNING,longpolling:WARNING
 workers = @@WOOW_ODOO_WORKERS@@
 max_cron_threads = @@WOOW_ODOO_MAX_CRON_THREADS@@
+db_maxconn = @@WOOW_ODOO_DB_MAXCONN@@
 limit_memory_hard = 2684354560
 limit_memory_soft = 2147483648
-limit_time_cpu = 600
-limit_time_real = 1200
+limit_time_cpu = @@WOOW_ODOO_LIMIT_TIME_CPU@@
+limit_time_real = @@WOOW_ODOO_LIMIT_TIME_REAL@@
+limit_time_real_cron = @@WOOW_ODOO_LIMIT_TIME_REAL_CRON@@
+limit_request = @@WOOW_ODOO_LIMIT_REQUEST@@
 proxy_mode = True
 @@SMTP_LINES@@
