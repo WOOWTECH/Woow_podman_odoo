@@ -102,8 +102,10 @@ odoo_render_gateway_conf_secret() {
   ODOO_GATEWAY_CONF=$(ql_render "$REPO/config/odoo-gateway.conf.template" - \
     "$REPO/config/odoo-gateway.conf.render-vars" - "ODOO_WS_PORT=$ws") \
     || ql_die 'could not render Odoo gateway configuration'
+  # shellcheck disable=SC2034 # ql_secret_ensure sets this for install.sh to read.
   QL_SECRET_CHANGED=0
   ql_secret_ensure odoo18-gateway-conf env:ODOO_GATEWAY_CONF --update
+  # shellcheck disable=SC2034 # erase the rendered secret from this shell variable.
   ODOO_GATEWAY_CONF=''
 }
 

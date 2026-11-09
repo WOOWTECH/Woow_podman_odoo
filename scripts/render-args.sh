@@ -61,9 +61,9 @@ render_args() {
   ql_assert_match WOOW_ODOO_DB_IMAGE "$db_image" '[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+(:[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}'
   # "all" publishes on every address family (IPv4 and IPv6): omit the host IP.
   if [[ $bind == all ]]; then prefix=''; else prefix="$bind:"; fi
-  # shellcheck disable=SC2034 # RENDER_ARGS is read by the caller
   [[ $gateway_bind == all ]] && gateway_bind=''
   [[ -z $gateway_bind ]] || gateway_bind+=:
+  # shellcheck disable=SC2034 # RENDER_ARGS is read by the caller.
   RENDER_ARGS=("ODOO_PUBLISH=$prefix$port" "ODOO_IMAGE=$image" "DB_IMAGE=$db_image"
     "ODOO_GATEWAY_PUBLISH=$gateway_bind$gateway_port")
 }
