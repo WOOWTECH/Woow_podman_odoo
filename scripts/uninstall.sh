@@ -10,7 +10,8 @@
 #                                                 backup of both volumes and the env file
 #   scripts/uninstall.sh --dry-run                report what would be removed
 #
-# --purge is the only way this repo deletes data. Images, backups and the addons dir are never deleted.
+# --purge is the only way this repo deletes service data. The optional timer separately prunes
+# its own automated archives; human-made backups and the addons dir are never deleted.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -33,6 +34,13 @@ while (($#)); do
 done
 ql_require_rootless
 ql_lock "$APP"
+if [[ -e $HOME/.config/systemd/user/odoo18-backup.timer ]]; then
+  if [[ ${QL_DRY_RUN:-0} == 1 ]]; then
+    ql_info '[dry-run] would disable the Odoo backup timer'
+  else
+    "$REPO/scripts/backup-schedule.sh" disable
+  fi
+fi
 if ((!purge)); then
   ql_uninstall_units "$APP"
   exit 0

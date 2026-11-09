@@ -176,6 +176,19 @@ scripts/restore.sh --archive ~/.local/share/woow-backups/odoo18/odoo18-<stamp>.t
 若在第一次變更之後失敗，會自動還原它在開始時建立的「還原前封存檔」；若連回復都失敗，Odoo 會保持停止，
 以免提供混合狀態。不在封存檔中的資料庫不會被動到，並會列出提醒。
 
+可選用每日備份計時器（台北時間 02:00 起，最多延後三小時以錯開執行）：
+
+```bash
+scripts/backup-schedule.sh enable   # 須先啟動健康的 Odoo 資料庫
+scripts/backup-schedule.sh status
+scripts/backup-schedule.sh disable  # 停用但保留已建立的封存檔
+```
+
+計時器執行不含密碼的 `backup.sh --automated`，封存檔驗證後才發布。只輪替自己建立的
+`odoo18-auto-*.tar`：保留最新七份，以及最近四個 ISO 週各週首份成功備份。若校驗檔缺失或錯誤，
+會停止整批輪替。手動、升級前與還原前備份都不在輪替範圍內。啟用期間請維持本倉庫的路徑；
+`uninstall.sh` 會停用計時器。
+
 ## 解除安裝
 
 ```bash
@@ -184,8 +197,8 @@ scripts/uninstall.sh --purge --confirm-purge odoo18      # 另外刪除兩個 vo
                                                          # 與 ~/.config/odoo18
 ```
 
-`--purge` 是唯一會刪除資料的指令，而且會先對兩個 volume 與 env 檔做最後一次冷備份。映像、備份與你的
-addons 目錄一律不刪除。
+`--purge` 是唯一會刪除服務資料的指令，而且會先對兩個 volume 與 env 檔做最後一次冷備份。映像、
+手動備份與 addons 目錄一律不刪除；可選的計時器只輪替自己建立的自動備份。
 
 ## 從既有 compose 部署遷移
 

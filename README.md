@@ -194,6 +194,20 @@ database role back to this host's password, and verifies. A failure after the fi
 the pre-restore archive it took at the start, and leaves Odoo stopped if even that fails, so it can
 never serve mixed state. Databases that are not in the archive are left alone and reported.
 
+For an optional daily backup timer (02:00 Asia/Taipei plus up to three hours of jitter):
+
+```bash
+scripts/backup-schedule.sh enable   # requires a healthy Odoo database
+scripts/backup-schedule.sh status
+scripts/backup-schedule.sh disable  # keeps existing archives
+```
+
+The timer calls `backup.sh --automated` without passwords and checks the archive before publishing it.
+Only its `odoo18-auto-*.tar` archives are pruned: the newest seven, plus the first successful backup
+from each of the most recent four ISO weeks, are retained. A missing or incorrect checksum stops all
+pruning. Manual, upgrade and pre-restore backups are never subject to this retention rule. Keep this
+repository checkout at the same path while the timer is enabled. `uninstall.sh` disables the timer.
+
 ## Uninstall
 
 ```bash
@@ -202,8 +216,9 @@ scripts/uninstall.sh --purge --confirm-purge odoo18      # also delete both volu
                                                          # the secrets and ~/.config/odoo18
 ```
 
-`--purge` is the only command that deletes data, and it takes a final cold backup of both volumes plus
-the env file first. Images, backups and your addons directory are never deleted.
+`--purge` is the only command that deletes service data, and it takes a final cold backup of both
+volumes plus the env file first. Images, manual backups and your addons directory are never deleted;
+the optional timer rotates only its own automated archives.
 
 ## Migrating an existing compose deployment
 

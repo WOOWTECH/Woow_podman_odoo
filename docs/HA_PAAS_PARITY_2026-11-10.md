@@ -21,7 +21,7 @@ cluster1 的 Gitea 本機 relay `127.0.0.1:3301` 當時未運行，公開網域�
 | 首次資料庫 | `default_db` 可自動建立，`without_demo` 可控 | tenant bootstrap 建庫、擴充、初始化與驗證；platform 不自動初始化 | 本分支可選首次自動建庫、產生管理員登入 secret，重跑會核對 base/web 安裝狀態 | 仍缺 PaaS 的中斷後自動修復與 PG17 擴充初始化 |
 | 升級守門 | Release 的升級測試與資料 hook；可設 `auto_update_module` | image digest marker、`-u all`／可選增量更新、事後模組驗證、次數限制 | 先備份並可回退 unit；`-u all` 是手動選項，沒有模組版本驗證 | 增加資料相容性與升級結果檢查；沿用現有備份邊界 |
 | 網路入口 | HA Ingress + nginx 雙入口；Cloudflare 路徑限制與啟動自檢 | nginx sidecar；資料庫管理路徑 404；查詢字串不寫入一般 access log | 預設只綁 `127.0.0.1:18069`；可開 LAN，沒有入口代理；本分支已加 `werkzeug:WARNING` 抑制含查詢字串的 Odoo INFO 請求紀錄 | 依實際公開需求設 Podman gateway、路徑限制與日誌驗證 |
-| 備份／還原 | Supervisor 冷備份，排除 cache、log、session | 定時 DB + filestore 備份、保留 daily/weekly、驗證、stage/switch 還原 | 手動冷備份所有 DB + filestore，校驗檔和回復失敗回退 | 增加排程與留存；實測新實例還原，勿用正式資料作試驗 |
+| 備份／還原 | Supervisor 冷備份，排除 cache、log、session | 定時 DB + filestore 備份、保留 daily/weekly、驗證、stage/switch 還原 | 手動冷備份所有 DB + filestore，校驗檔和回復失敗回退；本分支另有可選每日 systemd timer，僅輪替自動備份 | 尚未支援 PaaS 的不中斷 stage/switch、完整 manifest、獨立目的主機還原 |
 | SMTP / PDF | SMTP 選項、CJK 字型與 wkhtmltopdf | tenant SMTP、Noto CJK TC fallback 和 PDF 驗證 | 沒有 SMTP 設定介面或專用 CJK 字型層 | 提供設定與實印 PDF 驗證 |
 | 多租戶平台 | 非目標 | operator、平台 profile、獨立 cron、身分與 RBAC/NetworkPolicy | 單機 Odoo | 是否要實作 Podman 多租戶，待使用者確定；Kubernetes 專用機制應以相同效果而非原樣移植 |
 
@@ -48,3 +48,6 @@ cluster1 的 Gitea 本機 relay `127.0.0.1:3301` 當時未運行，公開網域�
 - Podman `scripts/upgrade.sh --update-modules` 切至該候選映像成功，完整版 smoke 16/16 通過，原資料與附件可讀；13 個 cloud 模組在 Odoo 中可見且未自動安裝。另實際安裝 `mail_fetchmail_durable`，資料庫顯示 `installed 18.0.1.0.1`，登入與原資料仍正常。
 - 可選的安裝器 bootstrap 另外建立 `odoo_auto_20261110`；其管理員登入驗證成功，`base`／`web` 均為 installed。重跑安裝器只報告既有庫已初始化，沒有重做資料。角色 dump 的 `\restrict`／純 SQL 轉換也以實際 PostgreSQL 建立一個暫時角色並重放兩次，兩次都成功，測後已刪除該角色。
 - 此映像只在本機，未推到 registry。PaaS source 的 `requirements-cloud.txt` 未鎖定全部 pip 版本，本次建置解析的 `pycryptodomex`、`websockets` 等版本以這顆本機 digest 為準。尚未驗證 PaaS 正式叢集或 HA ingress，也未演練 PG16→PG17 資料搬運與平台多租戶能力。
+- 另增加可選 `odoo18-backup.timer`：台北時間 02:00 加最多三小時延遲，每日執行 `backup.sh --automated`。驗證封存後只輪替 `odoo18-auto-*.tar`；保留最新七份及最近四個 ISO 週的首份成功備份。先核對所有自動封存與 sidecar 的 SHA256，有一份壞檔就停止整批清理。手動、升級前與還原前封存檔不受輪替影響；uninstall 會停用計時器。
+- 本機以 `backup.sh --automated` 與 `systemctl --user start odoo18-backup.service` 各實際建立一份約 3.4 MB 封存檔，後者 `Result=success`；`validate-backup.py` 對後者驗證通過，內含兩個測試 DB 的 custom-format dump，沒有 `secrets/`。`odoo18-backup.timer` 為 enabled，下一次執行排程可由 `systemctl --user list-timers` 查看；快速 smoke 8/8 通過。留存刪除行為另以 15 個造樣自動封存檔測過，包含校驗錯誤時不刪任何檔案。
+- GitHub 草稿 PR #8 的 `repo-checks/lint` 與 `quadlet-ci/quadlet` 在修正 ShellCheck 來源路徑後均通過（HEAD `789472f`）；本段新增排程變更需再跑 CI。

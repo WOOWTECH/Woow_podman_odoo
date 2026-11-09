@@ -3,7 +3,7 @@
 # hardened compose variant; the compose calls became systemd unit calls, and it now dumps every Odoo
 # database instead of only the "postgres" maintenance database.
 #
-#   scripts/backup.sh [--include-secrets]
+#   scripts/backup.sh [--include-secrets | --automated]
 #
 #   --include-secrets  also store the database and master passwords in the archive (0600 inside a
 #                      0700 directory). Needed to restore onto a host that has no secrets yet.
@@ -23,19 +23,21 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=odoo-helpers.sh
 . "$REPO/scripts/odoo-helpers.sh"
 
-include_secrets=0
+include_secrets=0 automated=0
 while (($#)); do
   case $1 in
     --include-secrets) include_secrets=1 ;;
+    --automated) automated=1 ;;
     -h | --help) sed -n '2,14p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift
 done
+((include_secrets == 0 || automated == 0)) || ql_die "--automated cannot include secrets"
 ql_require_rootless
 ql_lock "$APP"
-[[ $(podman inspect --format '{{.State.Health.Status}}' odoo18-db 2>/dev/null) == healthy ]] \
-  || ql_die "odoo18-db is not healthy; refusing to back up"
+ql_wait_container_healthy odoo18-db 120 \
+  || ql_die "odoo18-db did not become healthy within 120 seconds; refusing to back up"
 web_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-web 2>/dev/null || echo false)
 actual_odoo_image=$(podman inspect --format '{{.ImageName}}' odoo18-web 2>/dev/null || true)
 if [[ $actual_odoo_image != *@sha256:* ]]; then
@@ -104,8 +106,10 @@ podman unshare bash -c 'cd "$1"; find . -type f ! -name SHA256SUMS -print0 | LC_
 podman unshare find "$root" -type d -exec chmod 700 {} +
 podman unshare find "$root" -type f -exec chmod 600 {} +
 
-archive=$BACKUP_ROOT/odoo18-$stamp.tar
-[[ ! -e $archive ]] || archive=$BACKUP_ROOT/odoo18-$stamp-$$.tar
+prefix=odoo18
+((automated == 0)) || prefix=odoo18-auto
+archive=$BACKUP_ROOT/$prefix-$stamp.tar
+[[ ! -e $archive ]] || archive=$BACKUP_ROOT/$prefix-$stamp-$$.tar
 tmp=$staging/publish.tar
 podman unshare tar -C "$staging" -cf "$tmp" "odoo18-backup-$stamp"
 podman unshare chown 0:0 "$tmp"
@@ -122,4 +126,9 @@ if [[ $web_was_running == true ]]; then
   app_wait_healthy odoo18-web 300 odoo.service
 fi
 ql_info "backup complete: $archive ($(du -h "$archive" | cut -f1))"
+if ((automated)); then
+  # Only archives made by the timer can be pruned. Human, pre-upgrade and pre-restore
+  # backups retain their own lifecycle. Prune only after the new archive validated.
+  python3 "$REPO/scripts/retain-backups.py" --directory "$BACKUP_ROOT" >&2
+fi
 printf '%s\n' "$archive"
