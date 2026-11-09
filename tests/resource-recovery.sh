@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # A Podman reset removed the Odoo network and volumes while systemd still reports
 # the generated oneshot units active. A normal install must recover them once.
+# shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=../scripts/lib/quadlet-lib.sh
