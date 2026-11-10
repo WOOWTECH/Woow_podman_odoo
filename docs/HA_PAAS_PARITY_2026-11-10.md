@@ -23,7 +23,7 @@ cluster1 的 K3s 有多個 Odoo deployment，但查到的 `paas-test-odoo` 是�
 | HA 範例 addons | 公開 `odoo-addons` 固定 `51856b0` 的 7 顆 | 不屬於 cloud 清單 | 7/7 加在組合映像的獨立目錄，7/7 在新資料庫可見；`awesome_clicker` 實際安裝並保留於備份／還原 |
 | PaaS tenant addons | 不同模組線 | 已選租戶範本釘住 `cloud-odoo:20261101.1152`；範本註解指出當時 7 顆候選 addon，由管理員自行啟用。CI main 快照較新，清單已增至 13 顆 | 目前本機組合映像來自**較新的 CI main**，13/13 可見、`mail_fetchmail_durable` 曾實際安裝；**不能宣稱等於已釘的 20261101.1152**。該 tag 的 blob 未在 cluster1 的 partial clone，registry 又回 403，精確模組清單需從原 image／tag 再盤點 |
 | 資料庫 | 同容器 PG16 | 租戶範本釘 PG17.11 + pgvector 0.8.6、非管理員 Odoo DB 角色；預設 DB 名 `odoo` | 現場仍是 PG16 + pgvector 0.8.0；已加入完整 digest 釘版設定與 `PG_VERSION` 防誤用，尚未能從 JCR 拉下精確 PG17 映像，因此未宣稱版本對齊 |
-| 首次建庫 | `default_db`、語言與 demo 控制 | tenant bootstrap、extension、初始化及事後驗證 | `init-db.py` 與可選首次自動建庫可建立全新繁中庫；管理員密碼進 Podman secret，重跑只驗證 base/web 狀態。尚無 PaaS 的完整中斷修復／extension bootstrap |
+| 首次建庫 | `default_db`、語言與 demo 控制 | tenant bootstrap、extension、初始化及事後驗證 | tenant 模式把 `db_name` 固定為 `odoo`，建庫後查 C 排序規則、建立 `pg_trgm`／`vector`，並自動關閉資料庫管理入口；管理員密碼進 Podman secret。尚無 PaaS 的角色隔離及完整中斷修復 |
 | Web 與即時通道 | HA Ingress 和對外入口，含大量 token 路徑改寫 | nginx sidecar、拒絕 `/web/database/*`、WebSocket、保護日誌；租戶範本 `workers=0`、`maxCronThreads=2`、`dbMaxconn=8` | gateway、HSTS、登入表單、cookie 和日誌已測；目前測試機開 2 workers，**尚未切換到租戶範本的 0**，真實即時事件與 HA Ingress 路徑尚未測 |
 | SMTP | 可設 SMTP | tenant SMTP | 設定與密碼分別由環境設定／Podman secret 管；本機 SMTP sink 實際收到 Odoo 發出的信。外部服務 TLS／帳號授權尚未測 |
 | 備份與還原 | Supervisor 冷備份 | 定時 DB + filestore、保留規則、stage/switch 線上還原 | 全庫 + filestore 冷備份、校驗、定時器、輪替及同檔還原實測；還原後入口恢復、資料可讀。沒有 PaaS 的不中斷 stage/switch 或遠端目的地 |
@@ -46,4 +46,4 @@ HA 的 `woow_base_url_guard`、`woow_visitor_url` 是為 Supervisor Ingress 的 
 
 本分支的預設映像仍為公開 Odoo 18 + PG16。已新增 `config/profiles/tenant-cloud.profile`，固定租戶範本的 **cloud-odoo `20261101.1152`、chart `0.2.26` 對應設定及 PG17.11 映像 digest**；這是可重現的安裝輸入，還不是成功部署。使用者需先授權 JCR 讀取，並在**新的空資料卷／獨立實例**套用；既有 PG16 測試卷不能原地改成 PG17。若另要 HA 7 顆範例模組，再以已授權的 cloud image 當底層執行 `scripts/build-ha-cloud-image.sh`，得到另外一顆組合映像。主機目前跑的是較新 13 顆候選映像，只綁回圈位址，沒有正式對外流量切換。
 
-要宣稱與**選定的 tenant cloud** 同能力，還需取得釘版映像並盤點其實際 addon、在全新 PG17 空資料卷上完成 bootstrap 與 extension、把單庫 `list_db=False`／`dbfilter=^odoo$`、升級 gate、備份／還原契約與公開入口做實測；外部 SMTP TLS 亦未驗。PaaS platform 的 40 顆模組與控制面不列入這次驗收。以上均不涉及搬運既有資料。
+要宣稱與**選定的 tenant cloud** 同能力，還需取得釘版映像並盤點其實際 addon、在全新 PG17 空資料卷上實測 tenant bootstrap 與 `list_db=False`／`dbfilter=^odoo$`，補齊非管理員 Odoo DB 角色、升級 gate、備份／還原契約與公開入口實測；外部 SMTP TLS 亦未驗。PaaS platform 的 40 顆模組與控制面不列入這次驗收。以上均不涉及搬運既有資料。

@@ -188,6 +188,22 @@ if [[ -n $default_db ]]; then
   fi
 fi
 
+# PaaS tenant cloud serves exactly one database. Create/verify it while the Odoo database
+# service is temporarily enabled on loopback, then hide the manager and pin the database.
+if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+  odoo_ensure_tenant_database "$default_db"
+  if [[ $(ql_env_get WOOW_ODOO_LIST_DB) != False || $(ql_env_get WOOW_ODOO_DB_FILTER '') != '^odoo$' ]]; then
+    ql_env_set "$ENV_FILE" WOOW_ODOO_LIST_DB False
+    ql_env_set "$ENV_FILE" WOOW_ODOO_DB_FILTER '^odoo$'
+    odoo_render_conf_secret
+    systemctl --user restart odoo.service
+    app_wait_healthy odoo18-web 300 odoo.service
+    ql_wait_http "http://$host:$port/web/health" '200' 120 \
+      || ql_die 'Odoo health failed after tenant database lock-down'
+    ql_info "tenant database manager disabled; dbfilter pinned to ^odoo$"
+  fi
+fi
+
 # ---- 8. smoke ---------------------------------------------------------------------------------------
 if ((no_smoke == 0)); then
   "$REPO/tests/smoke.sh" || ql_die "tests/smoke.sh failed; see the FAIL lines above"

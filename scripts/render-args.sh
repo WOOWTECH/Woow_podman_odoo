@@ -65,10 +65,17 @@ render_args() {
   ql_assert_match WOOW_ODOO_DEFAULT_DB "$db" '([a-z][a-z0-9_]{0,62})?'
   ql_assert_match WOOW_ODOO_ADMIN_LOGIN "$login" '([A-Za-z0-9_.+@-]{3,254})?'
   ql_assert_match WOOW_ODOO_LANG "$lang" '[a-z]{2}_[A-Z]{2}'
+  ql_assert_match WOOW_ODOO_TENANT_CLOUD "$(ql_env_get WOOW_ODOO_TENANT_CLOUD False)" 'True|False'
   [[ -z $db || $db != postgres && $db != template0 && $db != template1 ]] \
     || ql_die "WOOW_ODOO_DEFAULT_DB: reserved PostgreSQL database name"
   [[ -z $db && -z $login || -n $db && -n $login ]] \
     || ql_die "WOOW_ODOO_DEFAULT_DB and WOOW_ODOO_ADMIN_LOGIN must be set together"
+  if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+    [[ $db == odoo && -n $login ]] \
+      || ql_die 'tenant cloud requires WOOW_ODOO_DEFAULT_DB=odoo and a real WOOW_ODOO_ADMIN_LOGIN'
+    [[ $bind == 127.0.0.1 && $gateway == True ]] \
+      || ql_die 'tenant cloud first run requires loopback Odoo and the gateway'
+  fi
   image=$(ql_env_get WOOW_ODOO_IMAGE '')
   [[ -n $image ]] || image=$(sed -n 's/^ODOO_IMAGE=//p' "$REPO/scripts/common.sh")
   # Explicit registry/repository and immutable digest. No whitespace, control characters, Quadlet

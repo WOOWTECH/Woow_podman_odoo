@@ -43,13 +43,17 @@ odoo_check_db_volume_major() {
 # and store the result as the odoo18-odoo-conf secret (replaced only when it differs). Sets
 # QL_SECRET_CHANGED=1 when it changed, so the caller restarts odoo.service.
 odoo_render_conf_secret() {
-  local xt=0 db admin list workers cron db_filter_line smtp_lines smtp_server smtp_user smtp_password ODOO_CONF
+  local xt=0 db admin list workers cron db_name_line db_filter_line smtp_lines smtp_server smtp_user smtp_password ODOO_CONF
   [[ $- == *x* ]] && xt=1 && set +x
   db=$(app_secret_read odoo18-postgres-password || true)
   admin=$(app_secret_read odoo18-admin-password || true)
   list=$(ql_env_get WOOW_ODOO_LIST_DB True)
   workers=$(ql_env_get WOOW_ODOO_WORKERS 0)
   cron=$(ql_env_get WOOW_ODOO_MAX_CRON_THREADS 1)
+  db_name_line=''
+  if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+    db_name_line="db_name = $(ql_env_get WOOW_ODOO_DEFAULT_DB)"
+  fi
   db_filter_line=''
   if [[ -n $(ql_env_get WOOW_ODOO_DB_FILTER '') ]]; then
     db_filter_line="dbfilter = $(ql_env_get WOOW_ODOO_DB_FILTER)"
@@ -87,6 +91,7 @@ odoo_render_conf_secret() {
     "WOOW_ODOO_LIMIT_TIME_REAL=$(ql_env_get WOOW_ODOO_LIMIT_TIME_REAL 1200)" \
     "WOOW_ODOO_LIMIT_TIME_REAL_CRON=$(ql_env_get WOOW_ODOO_LIMIT_TIME_REAL_CRON -1)" \
     "WOOW_ODOO_LIMIT_REQUEST=$(ql_env_get WOOW_ODOO_LIMIT_REQUEST 65536)" \
+    "DB_NAME_LINE=$db_name_line" \
     "DB_FILTER_LINE=$db_filter_line" \
     "SMTP_LINES=$smtp_lines") || ODOO_CONF=''
   smtp_lines=''
@@ -152,6 +157,28 @@ odoo_addons_check() {
 odoo_databases() {
   podman exec odoo18-db psql -X -U odoo -d postgres -Atc \
     "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate AND datname <> 'postgres' ORDER BY 1"
+}
+
+# Tenant cloud's first-run database must use Odoo's template0/C collation and expose both
+# extensions before users can install cloud addons. The database name is validated by
+# render_args; SQL below contains only that identifier, never a credential.
+odoo_ensure_tenant_database() {
+  local db=$1 collate extensions
+  [[ $db =~ ^[a-z][a-z0-9_]{0,62}$ ]] || ql_die 'unsafe tenant database name'
+  collate=$(podman exec odoo18-db psql -X -U odoo -d postgres -Atqc \
+    "SELECT datcollate FROM pg_database WHERE datname = '$db'" 2>/dev/null) \
+    || ql_die "cannot inspect collation of tenant database $db"
+  [[ $collate == C ]] \
+    || ql_die "tenant database $db has collation '${collate:-missing}', expected C; start with a new empty database volume"
+  podman exec odoo18-db psql -X -q -v ON_ERROR_STOP=1 -U odoo -d "$db" -c \
+    'CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS vector; ALTER EXTENSION vector UPDATE;' >/dev/null \
+    || ql_die "cannot initialize pg_trgm/vector in tenant database $db"
+  extensions=$(podman exec odoo18-db psql -X -U odoo -d "$db" -Atqc \
+    "SELECT string_agg(extname, ',' ORDER BY extname) FROM pg_extension WHERE extname IN ('pg_trgm','vector')" 2>/dev/null) \
+    || ql_die "cannot verify tenant extensions in $db"
+  [[ $extensions == pg_trgm,vector ]] \
+    || ql_die "tenant database $db is missing pg_trgm/vector ($extensions)"
+  ql_info "tenant database $db: C collation, pg_trgm and vector verified"
 }
 
 # odoo_check_db_password: the database role "odoo" must accept the password recorded in the

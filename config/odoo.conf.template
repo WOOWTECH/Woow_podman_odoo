@@ -13,6 +13,7 @@ db_user = odoo
 db_password = @@POSTGRES_PASSWORD@@
 admin_passwd = @@ODOO_ADMIN_PASSWORD@@
 list_db = @@WOOW_ODOO_LIST_DB@@
+@@DB_NAME_LINE@@
 @@DB_FILTER_LINE@@
 log_level = info
 ; Both werkzeug and the port 8072 longpolling logger include query strings in INFO request lines.

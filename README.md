@@ -106,6 +106,7 @@ Re-running `install.sh` is safe: with nothing changed it restarts nothing and ke
 | `WOOW_ODOO_DEFAULT_DB` | empty | Optional first-run database name. With `WOOW_ODOO_ADMIN_LOGIN`, the installer creates it once through local XML-RPC. |
 | `WOOW_ODOO_ADMIN_LOGIN` | empty | First administrator login for `WOOW_ODOO_DEFAULT_DB`; its generated password is a Podman secret. |
 | `WOOW_ODOO_LANG` | `zh_TW` | Language for first-run database creation. |
+| `WOOW_ODOO_TENANT_CLOUD` | `False` | On a new tenant instance, require database `odoo`, verify C collation and pg_trgm/vector, then close the database manager. |
 
 Everything else (workers, memory limits, `proxy_mode`, ...) is in `config/odoo.conf.template`. Edit the
 template, then run `scripts/install.sh`: the conf secret is re-rendered and Odoo restarts.
@@ -126,7 +127,9 @@ snapshot first. The module image and its registry permissions must remain availa
 The [capability comparison](docs/HA_PAAS_PARITY_2026-11-10.md) records what was verified on a **fresh**
 instance. The PaaS tenant template pins chart `0.2.26`, cloud image `20261101.1152` and PG17.11;
 use [the pinned profile](config/profiles/tenant-cloud.profile) on a new empty instance after obtaining
-JCR access. The local candidate was built from a later CI main snapshot with 13 addons, so it is
+JCR access. Fill `WOOW_ODOO_DEFAULT_DB=odoo` and a real `WOOW_ODOO_ADMIN_LOGIN` before installing.
+Tenant mode sets `db_name=odoo` and, after creating the database, sets `list_db=False` and
+`dbfilter=^odoo$`. The local candidate was built from a later CI main snapshot with 13 addons, so it is
 **not** the pinned tenant image. To add the seven public HA sample modules to an authorized cloud
 image, use this repo's composition helper:
 
@@ -139,6 +142,9 @@ database. Enable the gateway with `WOOW_ODOO_GATEWAY_ENABLED=True` while keeping
 The local gateway listens on `127.0.0.1:18080` by default. This profile does **not** contain the
 PaaS platform image's 40 modules or its external `woow_paas_platform` module. Private PaaS code and
 credentials are never copied into this public repository.
+The current Podman database image initializes `odoo` as a PostgreSQL superuser; the PaaS chart
+separates the database superuser and the Odoo role. Tenant mode does not yet match that isolation
+or the PaaS interrupted-bootstrap and upgrade-gate contract.
 
 ### Addons and rootless permissions
 

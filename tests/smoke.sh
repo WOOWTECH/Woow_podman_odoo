@@ -186,6 +186,24 @@ else
 fi
 podman exec odoo18-db dropdb -U odoo --if-exists "$probe_db" >/dev/null 2>&1 && probe_db=''
 
+if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+  tenant_db=$(ql_env_get WOOW_ODOO_DEFAULT_DB)
+  collate=$(podman exec odoo18-db psql -X -U odoo -d postgres -Atqc \
+    "SELECT datcollate FROM pg_database WHERE datname = '$tenant_db'" 2>/dev/null || true)
+  extensions=$(podman exec odoo18-db psql -X -U odoo -d "$tenant_db" -Atqc \
+    "SELECT string_agg(extname, ',' ORDER BY extname) FROM pg_extension WHERE extname IN ('pg_trgm','vector')" 2>/dev/null || true)
+  if [[ $collate == C && $extensions == pg_trgm,vector ]]; then
+    pass 'T1 tenant database uses C collation and pg_trgm/vector'
+  else
+    fail "T1 tenant database mismatch (collation=${collate:-?}, extensions=${extensions:-?})"
+  fi
+  if [[ $(ql_env_get WOOW_ODOO_LIST_DB) == False && $(ql_env_get WOOW_ODOO_DB_FILTER) == '^odoo$' ]]; then
+    pass 'T1 tenant database manager is disabled and dbfilter is pinned'
+  else
+    fail 'T1 tenant database manager/filter are not locked down'
+  fi
+fi
+
 # A9 addons are mounted read-only and the host directory keeps its owner
 rw=$(podman inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt/extra-addons"}}{{.RW}}{{end}}{{end}}' odoo18-web 2>/dev/null || true)
 if [[ $rw == false ]]; then pass "A9 /mnt/extra-addons is mounted read-only"; else fail "A9 /mnt/extra-addons mount RW=${rw:-missing}"; fi

@@ -8,7 +8,11 @@ check() { # check <description> <command...>
 }
 has_line() { grep -qxF -- "$3" "$WORK/$1/out/$2"; }
 
-run_variant tenant-pinned "$REPO/config/profiles/tenant-cloud.profile" "${base[@]}" \
+tenant_env=$WORK/tenant-pinned.env
+sed -e 's/^WOOW_ODOO_DEFAULT_DB=.*/WOOW_ODOO_DEFAULT_DB=odoo/' \
+    -e 's/^WOOW_ODOO_ADMIN_LOGIN=.*/WOOW_ODOO_ADMIN_LOGIN=tenant@example.invalid/' \
+    "$REPO/config/profiles/tenant-cloud.profile" >"$tenant_env"
+run_variant tenant-pinned "$tenant_env" "${base[@]}" \
   "$REPO/quadlet/optional/odoo-gateway.container"
 
 check "example publishes Odoo on 127.0.0.1:18069" has_line example odoo.container 'PublishPort=127.0.0.1:18069:8069'
@@ -43,7 +47,7 @@ conf_render() {
     WOOW_ODOO_WORKERS=2 WOOW_ODOO_MAX_CRON_THREADS=2 WOOW_ODOO_DB_MAXCONN=8 \
     WOOW_ODOO_LIMIT_TIME_CPU=60 WOOW_ODOO_LIMIT_TIME_REAL=120 \
     WOOW_ODOO_LIMIT_TIME_REAL_CRON=600 WOOW_ODOO_LIMIT_REQUEST=65536 \
-    DB_FILTER_LINE='dbfilter = ^odoo$' SMTP_LINES=''
+    DB_NAME_LINE='db_name = odoo' DB_FILTER_LINE='dbfilter = ^odoo$' SMTP_LINES=''
 }
 conf=$( (conf_render) 2>/dev/null) || conf=''
 check "odoo.conf.template renders" test -n "$conf"
@@ -54,6 +58,7 @@ check "the conf includes curated image and host addons" grep -qx \
   'addons_path = /usr/lib/python3/dist-packages/odoo/addons,/opt/woow/addons,/opt/woow/ha-addons,/mnt/extra-addons' <<<"$conf"
 check "worker and cron counts render" bash -c "grep -qx 'workers = 2' <<<\"\$1\" && grep -qx 'max_cron_threads = 2' <<<\"\$1\"" _ "$conf"
 check "tenant database and timeout limits render" bash -c "grep -Fqx 'dbfilter = ^odoo$' <<<\"\$1\" && grep -Fqx 'db_maxconn = 8' <<<\"\$1\" && grep -Fqx 'limit_time_real_cron = 600' <<<\"\$1\"" _ "$conf"
+check "tenant database name renders" grep -Fqx 'db_name = odoo' <<<"$conf"
 check "SMTP is absent until configured" bash -c "! grep -q '^smtp_' <<<\"\$1\"" _ "$conf"
 check "no default master password in the template" bash -c "! grep -qE '^admin_passwd *= *admin *\$' '$REPO/config/odoo.conf.template'"
 
@@ -79,6 +84,7 @@ reject "an unpinned PostgreSQL image" WOOW_ODOO_DB_IMAGE 'docker.io/library/post
 reject "an Odoo image containing a unit separator" WOOW_ODOO_IMAGE 'docker.io/library/odoo:18.0;ExecStart=evil'
 reject "a database name with a quote" WOOW_ODOO_DEFAULT_DB "odoo'bad"
 reject "an admin login without a database" WOOW_ODOO_ADMIN_LOGIN 'operator@example.invalid'
+reject "tenant mode without a database and admin login" WOOW_ODOO_TENANT_CLOUD True
 reject "too many workers" WOOW_ODOO_WORKERS 17
 reject "an unsafe database filter" WOOW_ODOO_DB_FILTER '.*'
 reject "an invalid database pool size" WOOW_ODOO_DB_MAXCONN 0
