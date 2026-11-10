@@ -6,6 +6,7 @@
 #   restore-online.sh --rollback --request ID --confirm-restore odoo18
 #   restore-online.sh --discard --request ID --confirm-restore odoo18
 #   restore-online.sh --finalize --request ID --confirm-restore odoo18 (after 24h)
+# shellcheck disable=SC2317 # ql_cleanup invokes the registered trap functions indirectly.
 set -euo pipefail
 umask 077
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -118,7 +119,7 @@ if [[ $mode == stage ]]; then
   [[ ! -e $state_dir && -z $(oid "$db_stage") ]] || ql_die 'request already exists; choose a new ID'
   archive=$(realpath -- "$archive")
   [[ -f $archive ]] || ql_die 'archive is missing'
-  mkdir -m 700 -p "$root"
+  install -d -m 700 -- "$root"
   mkdir -m 700 "$state_dir"
   work=$state_dir/work
   mkdir -m 700 "$work"
@@ -268,8 +269,10 @@ if [[ $mode == switch ]]; then
     || ql_die 'staged restore expired after 24 hours; discard it and stage a new request'
   [[ $(oid odoo) == "$live_oid" && $(oid "$db_stage") == "$stage_oid" && -z $(oid "$db_old") ]] \
     || ql_die 'database identity changed since staging'
-  podman unshare test -d "$fs_stage" && podman unshare test -d "$fs_live" \
-    && ! podman unshare test -e "$fs_old" || ql_die 'filestore identity changed since staging'
+  if ! podman unshare test -d "$fs_stage" || ! podman unshare test -d "$fs_live" \
+      || podman unshare test -e "$fs_old"; then
+    ql_die 'filestore identity changed since staging'
+  fi
   stop_web
   switched=0
   switch_cleanup() {

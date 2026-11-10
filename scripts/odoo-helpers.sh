@@ -361,5 +361,4 @@ admin.write({'login': '$login', 'password': Path('/run/secrets/first_admin_passw
 env.cr.commit()
 PY
   ql_info 'tenant database initialized and first administrator credential set before web start'
-  ODOO_TENANT_FRESH=1
 }
