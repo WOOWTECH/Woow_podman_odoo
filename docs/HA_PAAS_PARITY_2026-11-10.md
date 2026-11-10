@@ -22,12 +22,12 @@ cluster1 的 PaaS K3s 已核對內部 JFrog Service、現有 imagePullSecret 與
 | Odoo 核心與中文 | Odoo 18.0.20260930、繁中、CJK PDF | `cloud-odoo:20261101.1152`、Noto CJK TC | 本機以完全相同 digest 的 cloud 映像為底；繁中管理員網頁登入、聯絡人與附件實測，字型 `fc-match` 命中 Noto Sans CJK TC。HA 的 deb 日期不同；此版本未重跑實際 PDF 產生 |
 | HA 範例 addons | 公開 `odoo-addons` 固定 `51856b0` 的 7 顆 | 不屬於 cloud 清單 | 7/7 加在衍生映像的獨立目錄並在新資料庫可見；`awesome_clicker` 實際安裝，備份還原後仍為 installed |
 | PaaS tenant addons | 不同模組線 | 租戶範本釘住 `cloud-odoo:20261101.1152`，管理員自行啟用；較新 CI main 的 13 顆不是此版 | 從指定 digest 的原映像盤點出 7 顆，7/7 在新資料庫可見；`mail_fetchmail_durable` 實際安裝，還原後仍為 installed |
-| 資料庫 | 同容器 PG16 | PG17.11 + pgvector 0.8.6、非管理員 Odoo DB 角色；預設 DB 名 `odoo` | 已在新空卷啟動完全相同 digest 的 PG17.11，驗證 `vector` 0.8.6、`pg_trgm` 與 C collation，還原後仍維持；Odoo DB 角色目前仍為 superuser，角色隔離未對齊 |
-| 首次建庫 | `default_db`、語言與 demo 控制 | tenant bootstrap、extension、初始化及事後驗證 | 首次不預設 `db_name`，由 `init-db.py` 建立 `odoo` 與指定 Email 的管理員，密碼在獨立 Podman secret；建庫後才固定 `db_name`，關閉資料庫管理入口並鎖定 `dbfilter=^odoo$`。真實登入與預設 `admin/admin` 拒絕均已驗證 |
+| 資料庫 | 同容器 PG16 | PG17.11 + pgvector 0.8.6、非管理員 Odoo DB 角色；預設 DB 名 `odoo` | 相同 PG17.11 digest；因舊卷的 Odoo 是不可降權的 bootstrap 超級使用者（OID 10），已重建至 `postgres` 為初始超級使用者的新卷。`odoo` 為非 superuser、不可建庫／建角色，資料校驗、C collation、pg_trgm／vector 均通過；Odoo 容器沒有管理員密鑰 |
+| 首次建庫 | `default_db`、語言與 demo 控制 | tenant bootstrap、extension、初始化及事後驗證 | 現行 tenant 安裝先由 `postgres` 建 C collation 資料庫與擴充套件，再由受限 `odoo` 以一次性 CLI 執行 `-i base`，於 web 開放前設定管理員 secret；獨立探針庫已實測 base/web、登入 Email。實際租戶原先由 `init-db.py` 初建，之後已遷移至受限角色且真實登入通過；資料庫管理入口關閉、`dbfilter=^odoo$` |
 | Web 與即時通道 | HA Ingress 和對外入口，含 token 路徑改寫 | nginx sidecar、拒絕 `/web/database/*`、WebSocket、保護日誌；`workers=0`、`maxCronThreads=2`、`dbMaxconn=8` | 本機已用租戶範本的 0 workers／2 cron／8 連線；gateway 健康、資料庫管理 404、HTTP 表單登入與 session、cookie 和日誌檢查通過。即時事件與 HA Ingress 路徑尚未實測 |
 | SMTP | 可設 SMTP | tenant SMTP | 密碼存 Podman secret；先前候選映像已由 SMTP sink 收信。新 tenant 實例尚未配置外部 SMTP，TLS／帳號授權未測 |
-| 備份與還原 | Supervisor 冷備份 | 定時 DB + filestore、保留規則、stage/switch 線上還原 | PG17 實例完成含首位管理員 secret 的校驗封存及 `--restore-secrets` 演練；修改後的聯絡人與附件還原、C collation、模組及登入均驗證。定時器已恢復；不中斷 stage/switch 與遠端目的地仍未提供 |
-| 升級 | 版本 gate、資料 hook | digest marker、增量或全量模組更新及驗證 | 映像釘 digest；先前候選映像 `-u all` 在 3 庫成功，新 tenant 版尚未做升級演練。自動版本 gate 與完整模組驗證仍未提供 |
+| 備份與還原 | Supervisor 冷備份 | 定時 DB + filestore、保留規則、stage/switch 線上還原 | 受限 `odoo` 角色可建立校驗封存；`restore-online.sh` 已在線上預備、驗證模組與 18 個附件、切換、回退和丟棄旁路資料。切換／回退各快速 smoke 16/16；切換期間需短暫停止 web／gateway。遠端備份目的地尚未提供 |
+| 升級 | 版本 gate、資料 hook | digest marker、增量或全量模組更新及驗證 | `upgrade-gate.sh` 已在隔離 DB 用另一顆測試映像實際執行 `-u all`、模組完整核對後寫 done。缺少 addon 來源在寫 attempt 前拒絕；同 digest 三次失敗及 core 降版均以 78 拒絕。正式映像升級仍需有新映像才可驗收；PaaS 的來源差異增量計畫未移植，Podman 採全量更新 |
 
 HA 的 `woow_base_url_guard`、`woow_visitor_url` 是為 Supervisor Ingress 的 canonical URL／訪客來源修正，且以 `server_wide_modules` 載入。目前 Podman 入口沒有 HA Ingress token 路徑，兩顆模組尚未移入組合映像；這不等同於驗證 HA Ingress 的所有頁面／網站功能。
 
@@ -37,7 +37,7 @@ HA 的 `woow_base_url_guard`、`woow_visitor_url` 是為 Supervisor Ingress 的 
 - 以該 cloud 基底及公開 HA `odoo-addons` commit `51856b0` 建立 `localhost/woow-odoo-tenant-ha@sha256:f259166adad7e28138fb1a5fccb993cd6831b110ae316424162e5baf5227b5a1`。基底 7 顆 tenant 模組與額外 7 顆 HA 模組都可見；各安裝一顆並於還原後核對。衍生映像僅在本機，未推送到公開 registry。
 - 空的 PG17 資料卷上建立 `odoo`；管理員登入 Email 為 `woowtech@designsmart.com.tw`，隨機密碼在 `odoo18-odoo-admin-password` Podman secret。XML-RPC 與實際 HTTP 表單／session 登入通過，預設 `admin/admin` 失效。起初發現 `db_name` 過早設定會讓 Odoo 自行初始化預設管理員；已修正並重建空庫驗證。
 - 新庫建立聯絡人及二進位附件，讀回後封存。刻意修改聯絡人並刪附件，再以 `--restore-secrets` 還原；內容、管理員登入、兩個已安裝模組、`C` collation 與 `pg_trgm`／`vector` 皆驗證。測試聯絡人與附件事後已移除；乾淨狀態的含密碼校驗封存為 `odoo18-20261110T010008Z.tar`，僅在本機私有備份目錄。
-- 新實例完整 smoke **24 通過、0 失敗、1 項因租戶關閉資料庫服務而跳過**；還原後 quick smoke **16/16**。入口僅綁 `127.0.0.1:18080`，Odoo 本體僅綁 `127.0.0.1:18069`，資料庫無對外 port。未切換正式外部流量。
+- 新實例完成資料庫角色隔離後完整 smoke **26 通過、0 失敗、1 項因租戶關閉資料庫服務而跳過**；線上還原切換與回退各 quick smoke **16/16**，管理員 XML-RPC 登入也通過。入口僅綁 `127.0.0.1:18080`，Odoo 本體僅綁 `127.0.0.1:18069`，資料庫無對外 port。未切換正式外部流量。
 
 ## 先前候選映像實測紀錄（已封存並換成上述實例）
 
@@ -54,4 +54,13 @@ HA 的 `woow_base_url_guard`、`woow_visitor_url` 是為 Supervisor Ingress 的 
 
 本分支的預設映像仍為公開 Odoo 18 + PG16；`config/profiles/tenant-cloud.profile` 固定租戶範本的 **cloud-odoo `20261101.1152`、chart `0.2.26` 對應設定及 PG17.11 digest**。本機已在全新空資料卷實際套用，並以指定 cloud 映像建置含 HA 範例模組的衍生映像。舊 PG16 候選測試庫在替換前完成含密碼校驗封存；沒有以 PG17 開啟 PG16 的資料卷。啟動後 `list_db=False` 與 `dbfilter=^odoo$`，定時備份 timer 已恢復。
 
-現有差距：Odoo DB 角色仍為 PostgreSQL superuser；自動升級 gate、完整模組驗證、PaaS stage/switch 不停機還原及遠端備份目的地尚未提供。HA Supervisor Ingress、真實即時事件、外部 SMTP TLS／帳號及正式公開入口尚未驗收。PaaS platform 的約 40 顆模組與控制面不列入 tenant cloud 範圍。
+## 2026-11-10 角色隔離、升級閘與線上還原追加驗收
+
+- 原本 `odoo18-db-data` 的 `odoo` 是 PostgreSQL bootstrap OID 10，直接 `ALTER ROLE ... NOSUPERUSER` 被資料庫拒絕。`scripts/migrate-tenant-db-role.sh` 先停 web／gateway、建立含資料與私密憑證的校驗備份，再用 `postgres` 初始化新卷 `odoo18-db-data-isolated`。在旁路還原並核對模組、upgrade marker、附件與角色權限後才換 Quadlet 資料卷；舊卷保留作回退。新卷 `data_checksums=on`，`odoo` 的 `rolsuper`／`rolcreatedb`／`rolcreaterole` 全為 false，實際建庫也遭拒。Odoo 管理員和資料庫管理員使用獨立 Podman secrets。
+- 安裝程式也會檢查停止狀態的舊資料卷：若舊卷已有 PostgreSQL 資料、隔離卷尚未初始化，會先要求執行角色遷移，避免重裝時誤建立另一個空租戶庫。
+- 新租戶首裝改由受限角色配合 `postgres` 建庫／擴充套件；`-i base` 僅在尚無 `ir_module_module` 的全新庫執行，管理員登入與密碼在 web 開放前設定。既有庫不重跑 `-i base`。另建獨立 `odoo_bootstrap_probe` 庫，實際跑完一次性 `-i base`、管理員設定並核對 base/web 已安裝及 Email，之後已刪除探針庫、filestore 與其 secret。
+- `scripts/upgrade-gate.sh` 記錄映像 digest 與 Odoo deb core 日期，先核對已安裝模組來源與版本，再限制同 digest 三次嘗試，執行 `-u all`，驗證全部模組後才寫完成 marker。tenant Quadlet 的 `ExecStartPre` 每次啟動 web 都先跑此閘；實際 `systemctl --user restart odoo.service` 的 journal 顯示同 digest 跳過，入口恢復 200。隔離庫上用不同 ID、相同模組的測試映像完成一次真實更新；移走 `awesome_clicker` 的測試映像在寫 attempt 前被拒絕，人工注入的三次失敗與較新 core marker 都以 78 拒絕。正式部署仍用既定 cloud/HA digest，沒有切換到測試映像。
+- `scripts/restore-online.sh` 將本機受限角色產出的校驗備份還原到旁路資料庫與 filestore，驗證 26 顆已安裝模組、18 個附件引用、映像 digest 與 DB OID；預備階段正式 `/web/health` 持續 200。短暫停 web／gateway 後在同一個 PG transaction 改名兩庫，交換 filestore，重啟並跑 quick smoke。回退再交換回原資料庫與 filestore，原實例恢復健康；加入容量檢查、預備結果 24 小時期限與切換後舊資料至少保留 24 小時的 finalize 閘。兩輪切換／回退各通過 quick smoke 16/16，旁路資料已安全丟棄。這是線上預備、短暫切換，不宣稱零停機。
+- Cloudflare Tunnel 現連到 PaaS Access 61；它的四條既有路由是 Pi Web、Tunnel 設定、OpenDesign、Hermes，沒有 Odoo。現有 OAuth scope 僅 `workspace:read security-access:read security-access:tunnel`，無路由編輯權限。Odoo gateway 目前仍僅在 loopback，外部網址與 Access 保護設定待正式切換。
+
+現有差距：PaaS 來源差異增量升級計畫、遠端備份目的地、HA Supervisor Ingress、真實即時事件、外部 SMTP TLS／帳號與正式外部路由尚未驗收。PaaS platform 的約 40 顆模組與控制面不列入 tenant cloud 範圍。

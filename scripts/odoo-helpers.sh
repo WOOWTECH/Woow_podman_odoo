@@ -4,11 +4,38 @@
 
 # Podman system reset can remove resources while their generated systemd oneshot units still show
 # active. Restart only such stale units; inactive dependencies are started by the normal unit path.
+odoo_db_volume_name() {
+  if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+    printf '%s' odoo18-db-data-isolated
+  else
+    printf '%s' odoo18-db-data
+  fi
+}
+
+# Refuse to create an empty isolated tenant cluster beside an initialized legacy volume.
+# The legacy cluster may be stopped, so a role query against a running container is not enough.
+odoo_tenant_guard_legacy_volume() {
+  local old_mount new_mount
+  [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]] || return 0
+  podman volume exists odoo18-db-data || return 0
+  old_mount=$(podman volume inspect --format '{{.Mountpoint}}' odoo18-db-data) \
+    || ql_die 'cannot inspect legacy Odoo database volume'
+  [[ $old_mount == /* && $old_mount != / ]] || ql_die 'unsafe legacy Odoo volume mountpoint'
+  podman unshare test -f "$old_mount/PG_VERSION" || return 0
+  if podman volume exists odoo18-db-data-isolated; then
+    new_mount=$(podman volume inspect --format '{{.Mountpoint}}' odoo18-db-data-isolated) \
+      || ql_die 'cannot inspect isolated Odoo database volume'
+    [[ $new_mount == /* && $new_mount != / ]] || ql_die 'unsafe isolated Odoo volume mountpoint'
+    podman unshare test -f "$new_mount/PG_VERSION" && return 0
+  fi
+  ql_die 'legacy Odoo database volume has data but isolated tenant volume is empty; run scripts/migrate-tenant-db-role.sh before install'
+}
+
 odoo_reconcile_resources() {
   local kind name unit spec
   for spec in \
     network:odoo18-network:odoo-network.service \
-    volume:odoo18-db-data:odoo-db-data-volume.service \
+    "volume:$(odoo_db_volume_name):odoo-db-data-volume.service" \
     volume:odoo18-web-data:odoo-web-data-volume.service; do
     IFS=: read -r kind name unit <<<"$spec"
     if podman "$kind" exists "$name" >/dev/null 2>&1; then continue; fi
@@ -28,8 +55,8 @@ odoo_check_db_volume_major() {
   [[ $major =~ PostgreSQL\)[[:space:]]([0-9]+)\. ]] \
     || ql_die "unexpected PostgreSQL version output from $image"
   major=${BASH_REMATCH[1]}
-  if ! podman volume exists odoo18-db-data; then return 0; fi
-  mountpoint=$(podman volume inspect --format '{{.Mountpoint}}' odoo18-db-data) \
+  if ! podman volume exists "$(odoo_db_volume_name)"; then return 0; fi
+  mountpoint=$(podman volume inspect --format '{{.Mountpoint}}' "$(odoo_db_volume_name)") \
     || ql_die 'cannot inspect Odoo database volume'
   [[ $mountpoint == /* && $mountpoint != / ]] || ql_die 'unsafe Odoo database volume mountpoint'
   if podman unshare test -f "$mountpoint/PG_VERSION"; then
@@ -158,6 +185,15 @@ odoo_addons_check() {
 
 # odoo_databases: the Odoo databases (every database except postgres and the templates), one per line
 odoo_databases() {
+  if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+    local actor=odoo
+    if podman exec odoo18-db psql -X -U postgres -d postgres -Atqc 'SELECT 1' >/dev/null 2>&1; then
+      actor=postgres
+    fi
+    podman exec odoo18-db psql -X -U "$actor" -d postgres -Atqc \
+      "SELECT datname FROM pg_database WHERE datname = 'odoo' AND datallowconn"
+    return
+  fi
   podman exec odoo18-db psql -X -U odoo -d postgres -Atc \
     "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate AND datname <> 'postgres' ORDER BY 1"
 }
@@ -173,7 +209,7 @@ odoo_ensure_tenant_database() {
     || ql_die "cannot inspect collation of tenant database $db"
   [[ $collate == C ]] \
     || ql_die "tenant database $db has collation '${collate:-missing}', expected C; start with a new empty database volume"
-  podman exec odoo18-db psql -X -q -v ON_ERROR_STOP=1 -U odoo -d "$db" -c \
+  podman exec odoo18-db psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$db" -c \
     'CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS vector; ALTER EXTENSION vector UPDATE;' >/dev/null \
     || ql_die "cannot initialize pg_trgm/vector in tenant database $db"
   extensions=$(podman exec odoo18-db psql -X -U odoo -d "$db" -Atqc \
@@ -211,16 +247,119 @@ odoo_check_db_password() {
 # odoo_set_role_password: make the database role "odoo" use the current odoo18-postgres-password
 # secret. The statement travels on psql's stdin, never in argv.
 odoo_set_role_password() {
-  local xt=0 pw rc=0
+  local xt=0 pw rc=0 actor=odoo
   [[ $- == *x* ]] && xt=1 && set +x
   pw=$(app_secret_read odoo18-postgres-password || true)
   if [[ ! $pw =~ ^[A-Za-z0-9+/=_.-]+$ ]]; then
     ((xt)) && set -x
     ql_die "secret odoo18-postgres-password is missing or has unexpected characters"
   fi
-  printf "ALTER ROLE odoo PASSWORD '%s';\n" "$pw" \
-    | podman exec -i odoo18-db psql -X -q -v ON_ERROR_STOP=1 -U odoo -d postgres >/dev/null || rc=$?
+  [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) != True ]] || actor=postgres
+  ODOO_DB_PASSWORD=$pw podman exec -i -e ODOO_DB_PASSWORD odoo18-db \
+    psql -X -q -v ON_ERROR_STOP=1 -U "$actor" -d postgres >/dev/null <<'SQL' || rc=$?
+\getenv pw ODOO_DB_PASSWORD
+ALTER ROLE odoo PASSWORD :'pw';
+\unset pw
+SQL
   pw=''
   ((xt)) && set -x
   return "$rc"
+}
+
+# The tenant database superuser is never mounted in the Odoo container. On an existing PG
+# cluster the old odoo role may still be superuser; create the replacement before changing
+# the Quadlet's POSTGRES_USER. The password is passed to psql through an exec environment.
+odoo_tenant_prepare_existing_pg() {
+  local pw actor role
+  [[ $(podman inspect --format '{{.State.Running}}' odoo18-db 2>/dev/null || true) == true ]] || return 0
+  role=$(podman exec odoo18-db psql -X -U odoo -d postgres -Atqc \
+    "SELECT rolsuper FROM pg_roles WHERE rolname='postgres'" 2>/dev/null || true)
+  if [[ -z $role ]]; then
+    [[ $(podman exec odoo18-db psql -X -U odoo -d postgres -Atqc \
+      "SELECT rolsuper FROM pg_roles WHERE rolname='odoo'") == t ]] \
+      || ql_die 'no PostgreSQL superuser role is available for the tenant migration'
+    podman exec odoo18-db psql -X -q -v ON_ERROR_STOP=1 -U odoo -d postgres \
+      -c 'CREATE ROLE postgres SUPERUSER LOGIN' >/dev/null
+  elif [[ $role != t ]]; then
+    ql_die 'existing postgres role is not superuser; inspect before changing the database unit'
+  fi
+  pw=$(app_secret_read odoo18-postgres-super-password)
+  [[ -n $pw ]] || ql_die 'PostgreSQL superuser secret is missing'
+  ODOO_PG_SUPER_PASSWORD=$pw podman exec -i -e ODOO_PG_SUPER_PASSWORD odoo18-db \
+    psql -X -q -v ON_ERROR_STOP=1 -U postgres -d postgres >/dev/null <<'SQL'
+\getenv pw ODOO_PG_SUPER_PASSWORD
+ALTER ROLE postgres PASSWORD :'pw';
+\unset pw
+SQL
+  pw=''
+}
+
+odoo_tenant_bootstrap_db() {
+  local db=$1 pw exists initialized
+  [[ $db == odoo ]] || ql_die 'tenant profile requires database odoo'
+  [[ $(podman exec odoo18-db psql -X -U postgres -d postgres -Atqc \
+    "SELECT oid FROM pg_authid WHERE rolname='odoo'") != 10 ]] \
+    || ql_die 'odoo is the bootstrap superuser (OID 10); migrate to a postgres-owned cluster before installing'
+  pw=$(app_secret_read odoo18-postgres-password)
+  [[ -n $pw ]] || ql_die 'Odoo database password secret is missing'
+  ODOO_DB_PASSWORD=$pw podman exec -i -e ODOO_DB_PASSWORD odoo18-db \
+    psql -X -q -v ON_ERROR_STOP=1 -U postgres -d postgres >/dev/null <<'SQL'
+\getenv pw ODOO_DB_PASSWORD
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='odoo') THEN
+    CREATE ROLE odoo LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
+  END IF;
+END $$;
+ALTER ROLE odoo PASSWORD :'pw';
+\unset pw
+SQL
+  pw=''
+  exists=$(podman exec odoo18-db psql -X -U postgres -d postgres -Atqc \
+    "SELECT count(*) FROM pg_database WHERE datname='odoo'")
+  if [[ $exists == 0 ]]; then
+    podman exec odoo18-db createdb -U postgres -O odoo --template=template0 --encoding=UTF8 \
+      --lc-collate=C odoo
+  fi
+  podman exec odoo18-db psql -X -q -v ON_ERROR_STOP=1 -U postgres -d postgres \
+    -c 'ALTER DATABASE odoo OWNER TO odoo' >/dev/null
+  odoo_ensure_tenant_database odoo
+  podman exec odoo18-db psql -X -q -v ON_ERROR_STOP=1 -U postgres -d postgres \
+    -c 'ALTER ROLE odoo NOSUPERUSER NOCREATEDB NOCREATEROLE' >/dev/null
+  initialized=$(podman exec odoo18-db psql -X -U postgres -d odoo -Atqc \
+    "SELECT to_regclass('public.ir_module_module') IS NOT NULL")
+  [[ $initialized == t ]] || odoo_tenant_init_base "$db"
+}
+
+# First install runs entirely before the web and gateway services. -i base is never run
+# against an initialized database because it can reset the administrator's noupdate record.
+odoo_tenant_init_base() {
+  local db=${1:-odoo} addons login secret log_dir
+  [[ $db =~ ^[a-z][a-z0-9_]{0,62}$ ]] || ql_die 'unsafe bootstrap database name'
+  addons=$(ql_expand_home "$(ql_env_get WOOW_ODOO_ADDONS_DIR)")
+  login=$(ql_env_get WOOW_ODOO_ADMIN_LOGIN)
+  secret=odoo18-$db-admin-password
+  ql_secret_ensure "$secret" random:44
+  log_dir=$(app_state_dir)/bootstrap
+  (umask 077 && mkdir -p "$log_dir")
+  podman run --rm --network odoo18-network --name odoo18-bootstrap \
+    --volume odoo18-web-data:/var/lib/odoo \
+    --volume "$addons":/mnt/extra-addons:ro,Z \
+    --secret odoo18-odoo-conf,type=mount,target=/etc/odoo/odoo.conf,uid=100,gid=101,mode=0400 \
+    --entrypoint odoo "$ODOO_IMAGE" -c /etc/odoo/odoo.conf -d "$db" \
+    -i base --stop-after-init --no-http >"$log_dir/$db-init.log" 2>&1 \
+    || ql_die "tenant base initialization failed; inspect $log_dir/$db-init.log before retrying"
+  podman run --rm -i --network odoo18-network --name odoo18-set-admin \
+    --volume odoo18-web-data:/var/lib/odoo \
+    --volume "$addons":/mnt/extra-addons:ro,Z \
+    --secret odoo18-odoo-conf,type=mount,target=/etc/odoo/odoo.conf,uid=100,gid=101,mode=0400 \
+    --secret "$secret",type=mount,target=first_admin_password,uid=100,gid=101,mode=0400 \
+    --entrypoint odoo "$ODOO_IMAGE" shell -c /etc/odoo/odoo.conf -d "$db" --no-http >"$log_dir/$db-admin.log" 2>&1 <<PY \
+    || ql_die "tenant administrator initialization failed; inspect $log_dir/$db-admin.log"
+from pathlib import Path
+admin = env.ref('base.user_admin')
+admin.write({'login': '$login', 'password': Path('/run/secrets/first_admin_password').read_text().strip()})
+env.cr.commit()
+PY
+  ql_info 'tenant database initialized and first administrator credential set before web start'
+  ODOO_TENANT_FRESH=1
 }

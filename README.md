@@ -128,9 +128,11 @@ The [capability comparison](docs/HA_PAAS_PARITY_2026-11-10.md) records what was 
 instance. The PaaS tenant template pins chart `0.2.26`, cloud image `20261101.1152` and PG17.11;
 use [the pinned profile](config/profiles/tenant-cloud.profile) on a new empty instance after obtaining
 JCR access. Fill `WOOW_ODOO_DEFAULT_DB=odoo` and a real `WOOW_ODOO_ADMIN_LOGIN` before installing.
-Tenant mode lets `init-db.py` create the database with the chosen administrator, then sets
-`db_name=odoo`, `list_db=False` and `dbfilter=^odoo$`. Setting `db_name` before bootstrap lets Odoo
-create a default `admin/admin` account. The selected cloud image has seven tenant addons; a separate
+Tenant mode initializes PostgreSQL with the `postgres` superuser in
+`odoo18-db-data-isolated`, creates an unprivileged `odoo` role and a C-collation database,
+runs `-i base` once while the web is stopped, and sets the administrator from a Podman secret
+before serving. It then sets `db_name=odoo`, `list_db=False` and `dbfilter=^odoo$`.
+The selected cloud image has seven tenant addons; a separate
 later CI main candidate with 13 addons is not the pinned tenant image. To add the seven public HA sample modules to an authorized cloud
 image, use this repo's composition helper:
 
@@ -143,9 +145,11 @@ database. Enable the gateway with `WOOW_ODOO_GATEWAY_ENABLED=True` while keeping
 The local gateway listens on `127.0.0.1:18080` by default. This profile does **not** contain the
 PaaS platform image's 40 modules or its external `woow_paas_platform` module. Private PaaS code and
 credentials are never copied into this public repository.
-The current Podman database image initializes `odoo` as a PostgreSQL superuser; the PaaS chart
-separates the database superuser and the Odoo role. Tenant mode does not yet match that isolation
-or the PaaS interrupted-bootstrap and upgrade-gate contract.
+If an older tenant installation used `odoo` as PostgreSQL's bootstrap superuser (OID 10),
+PostgreSQL will not demote it. Run `scripts/migrate-tenant-db-role.sh`: it takes a verified
+backup, rebuilds into the isolated volume, validates the restricted role and data, switches
+the Quadlet, and retains the old volume for rollback. The migration was exercised on the
+rootless Podman host. [The comparison record](docs/HA_PAAS_PARITY_2026-11-10.md) has the checks.
 
 ### Addons and rootless permissions
 
@@ -173,7 +177,8 @@ podman exec odoo18-web odoo -c /etc/odoo/odoo.conf -d <database> -u <module> --s
 
 | Podman secret | What it is | How it reaches the container |
 |---|---|---|
-| `odoo18-postgres-password` | password of the database role `odoo` | mounted at `/run/secrets/postgres_password`; PostgreSQL reads it through `POSTGRES_PASSWORD_FILE` when the volume is initialised |
+| `odoo18-postgres-password` | password of the database role `odoo` | rendered into Odoo config; generic installations also use it for PostgreSQL bootstrap |
+| `odoo18-postgres-super-password` | tenant PostgreSQL administrator password | mounted only in the database container, never in Odoo |
 | `odoo18-admin-password` | Odoo master (database-manager) password | not mounted; it is rendered into the conf |
 | `odoo18-odoo-conf` | the rendered `/etc/odoo/odoo.conf` | mounted read-only, owner `odoo`, mode 0400 |
 | `odoo18-gateway-conf` | optional nginx config | mounted read-only in the gateway |
@@ -203,13 +208,17 @@ default master password `admin` is rejected.
 
 ```bash
 git pull
-scripts/upgrade.sh                     # add --update-modules to run `odoo -u all` per database
+scripts/upgrade.sh                     # generic profile: add --update-modules for `odoo -u all`
 ```
 
 It backs up, saves the installed units, runs `install.sh` (which pulls the new pinned images first),
 brings pgvector forward in every database (`ALTER EXTENSION vector UPDATE`) and runs the smoke test.
 If anything fails, the previous units come back and Odoo restarts on the previous images. A database
 that a newer Odoo has already migrated is not rolled back: restore the pre-upgrade archive.
+Tenant cloud always checks the image digest and core date before serving. A new digest must pass
+installed-addon source checks, a bounded `-u all`, and post-upgrade module verification; the
+same digest is skipped. Three failed attempts or a core downgrade are blocked. Use
+`scripts/upgrade.sh` for tenant image changes so the gate has a pre-upgrade backup.
 
 ## Backup and restore
 
@@ -224,10 +233,27 @@ An archive holds `roles.sql`, one custom-format dump per Odoo database, the whol
 before it is published and again before it is restored (`scripts/validate-backup.py`; no symlinks, no
 path traversal, checksums, real PostgreSQL dumps).
 
-Restore drops and recreates the databases that are in the archive, swaps their filestores, sets the
+Generic-profile restore drops and recreates the databases that are in the archive, swaps their filestores, sets the
 database role back to this host's password, and verifies. A failure after the first change restores
 the pre-restore archive it took at the start, and leaves Odoo stopped if even that fails, so it can
 never serve mixed state. Databases that are not in the archive are left alone and reported.
+
+Tenant cloud uses staged restore. `restore.sh` stages and switches in one call, retaining the
+previous database and filestore for rollback. To review the stage before switching:
+
+```bash
+scripts/restore-online.sh --stage --archive <backup.tar> --request <id>
+scripts/restore-online.sh --switch --request <id> --confirm-restore odoo18
+scripts/restore-online.sh --rollback --request <id> --confirm-restore odoo18
+scripts/restore-online.sh --discard --request <id> --confirm-restore odoo18
+```
+
+The stage verifies the backup, image, module versions, attachment references and database
+identity while the live web serves. Stages expire after 24 hours. Switching stops the web and
+gateway briefly, renames the databases in one transaction, swaps filestores, then checks health;
+failure attempts an automatic rollback. A successful switch retains old data for 24 hours;
+`--finalize --request <id> --confirm-restore odoo18` removes it after that period. Tenant
+restore keeps this host's existing credentials; `--restore-secrets` is for the generic cold path.
 
 For an optional daily backup timer (02:00 Asia/Taipei plus up to three hours of jitter):
 

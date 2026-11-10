@@ -39,8 +39,15 @@ done
 archive=$(realpath -- "$archive")
 [[ -f $archive ]] || ql_die "archive not found: $archive"
 ql_require_rootless
-ql_lock "$APP"
 app_env_load
+if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+  ((restore_secrets == 0)) || ql_die 'tenant online restore keeps the running credentials; --restore-secrets is supported only by the legacy cold restore'
+  request=auto$(date -u +%Y%m%d%H%M%S)
+  "$REPO/scripts/restore-online.sh" --stage --archive "$archive" --request "$request"
+  "$REPO/scripts/restore-online.sh" --switch --request "$request" --confirm-restore "$APP"
+  exit 0
+fi
+ql_lock "$APP"
 rollback_mode=${ODOO_RESTORE_ROLLBACK:-false}
 
 stage_parent=$(mktemp -d "$BACKUP_ROOT/.restore.XXXXXX")

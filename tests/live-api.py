@@ -22,7 +22,7 @@ def secret_value(name: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("seed", "mutate", "verify"))
+    parser.add_argument("mode", choices=("login", "seed", "mutate", "verify"))
     parser.add_argument("--database", required=True)
     parser.add_argument("--admin-login", required=True)
     parser.add_argument("--password-secret", required=True)
@@ -47,6 +47,9 @@ def main() -> int:
         uid = common.authenticate(args.database, args.admin_login, password, {})
         if not isinstance(uid, int) or uid <= 0:
             raise RuntimeError("administrator authentication failed")
+        if args.mode == "login":
+            print("verified administrator authentication")
+            return 0
 
         def call(model: str, method: str, *params):
             return models.execute_kw(args.database, uid, password, model, method, list(params))

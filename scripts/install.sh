@@ -63,6 +63,17 @@ default_db_image=$DB_IMAGE
 DB_IMAGE=$(ql_env_get WOOW_ODOO_DB_IMAGE '')
 [[ -n $DB_IMAGE ]] || DB_IMAGE=$default_db_image
 gateway_enabled=$(ql_env_get WOOW_ODOO_GATEWAY_ENABLED False)
+if [[ $dry == 0 && ${ODOO_TENANT_ROLE_MIGRATION:-0} != 1 ]]; then
+  odoo_tenant_guard_legacy_volume
+fi
+if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True && $dry == 0 && \
+      ${ODOO_TENANT_ROLE_MIGRATION:-0} != 1 && \
+      $(podman inspect --format '{{.State.Running}}' odoo18-db 2>/dev/null || true) == true ]]; then
+  initial_role=$(podman exec odoo18-db psql -X -U odoo -d postgres -Atqc \
+    "SELECT oid FROM pg_authid WHERE rolname='odoo'" 2>/dev/null || true)
+  [[ $initial_role != 10 ]] \
+    || ql_die 'existing odoo is the PostgreSQL bootstrap superuser; run scripts/migrate-tenant-db-role.sh before install'
+fi
 
 # ---- 3. legacy guards -------------------------------------------------------------------------
 # The compose-era variant ran as odoo18.service plus odoo18-health.timer (hand-written user units).
@@ -112,6 +123,11 @@ if [[ $dry == 0 ]]; then
 fi
 ql_secret_ensure odoo18-postgres-password random:44
 ql_secret_ensure odoo18-admin-password random:44
+tenant_cloud=$(ql_env_get WOOW_ODOO_TENANT_CLOUD False)
+if [[ $tenant_cloud == True ]]; then
+  ql_secret_ensure odoo18-postgres-super-password random:44
+  if [[ $dry == 0 ]]; then odoo_tenant_prepare_existing_pg; fi
+fi
 restart_web=0
 restart_gateway=0
 if [[ $dry == 1 ]] && ! podman secret exists odoo18-admin-password; then
@@ -123,6 +139,12 @@ fi
 if [[ $gateway_enabled == True ]]; then
   odoo_render_gateway_conf_secret
   [[ $QL_SECRET_CHANGED == 0 ]] || restart_gateway=1
+fi
+existing_web_image=$(podman inspect --format '{{.Image}}' odoo18-web 2>/dev/null || true)
+target_web_image=$(podman image inspect --format '{{.Id}}' "$ODOO_IMAGE" 2>/dev/null || true)
+if [[ $tenant_cloud == True && $dry == 0 && -n $existing_web_image && \
+      $existing_web_image != "$target_web_image" && ${ODOO_UPGRADE_AUTHORIZED:-0} != 1 ]]; then
+  ql_die 'tenant image changed; use scripts/upgrade.sh so a verified pre-upgrade backup exists before the gate runs'
 fi
 
 # ---- 7. install changed files; start the database, then Odoo -------------------------------------
@@ -145,11 +167,27 @@ systemctl --user daemon-reload
 odoo_reconcile_resources
 ql_apply_units "$APP" odoo-db.service
 app_wait_healthy odoo18-db 180 odoo-db.service
+if [[ $tenant_cloud == True ]]; then
+  systemctl --user start odoo-web-data-volume.service
+  ODOO_TENANT_FRESH=0
+  odoo_tenant_bootstrap_db "$(ql_env_get WOOW_ODOO_DEFAULT_DB)"
+fi
 odoo_check_db_password || ql_die "the database role odoo does not accept the password in the
 odoo18-postgres-password secret. The volume odoo18-db-data already held a cluster, and
 POSTGRES_PASSWORD_FILE only applies to an empty volume, so the role still uses whatever password it
 was created with -- possibly the one this repository published before 2026-09. Point the role at the
 recorded secret with: scripts/rotate-secrets.sh --db"
+if [[ $tenant_cloud == True ]]; then
+  if [[ $ODOO_TENANT_FRESH == 1 ]]; then
+    "$REPO/scripts/upgrade-gate.sh" --image "$ODOO_IMAGE" --adopt-fresh
+  else
+    if [[ -n $existing_web_image && $existing_web_image != "$target_web_image" ]]; then
+      systemctl --user stop odoo-gateway.service 2>/dev/null || true
+      systemctl --user stop odoo.service
+    fi
+    "$REPO/scripts/upgrade-gate.sh" --image "$ODOO_IMAGE"
+  fi
+fi
 ql_apply_units "$APP" odoo.service
 app_wait_healthy odoo18-web 300 odoo.service
 if [[ $gateway_enabled == True ]]; then
@@ -167,7 +205,7 @@ ql_wait_http "http://$host:$port/web/health" '200' 120 || ql_die "Odoo does not 
 # Optional first-run bootstrap. Never re-run -i base on an existing database: it can reset
 # noupdate records such as the first administrator. A partial database fails loudly.
 default_db=$(ql_env_get WOOW_ODOO_DEFAULT_DB '')
-if [[ -n $default_db ]]; then
+if [[ -n $default_db && $tenant_cloud != True ]]; then
   dbs=$(odoo_databases) || ql_die "cannot list Odoo databases before bootstrap"
   if grep -qxF "$default_db" <<<"$dbs"; then
     installed=$(podman exec odoo18-db psql -X -U odoo -d "$default_db" -Atc \
@@ -190,7 +228,7 @@ fi
 
 # PaaS tenant cloud serves exactly one database. Create/verify it while the Odoo database
 # service is temporarily enabled on loopback, then hide the manager and pin the database.
-if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+if [[ $tenant_cloud == True ]]; then
   odoo_ensure_tenant_database "$default_db"
   if [[ $(ql_env_get WOOW_ODOO_LIST_DB) != False || $(ql_env_get WOOW_ODOO_DB_FILTER '') != '^odoo$' ]]; then
     ql_env_set "$ENV_FILE" WOOW_ODOO_LIST_DB False

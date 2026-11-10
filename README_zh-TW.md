@@ -112,7 +112,7 @@ PaaS cloud 映像應從有權限的 `paas-odoo-ci` 原始碼及 `Dockerfile.clou
 
 ### 全新 HA 與 PaaS cloud 模組組合
 
-[功能對照紀錄](docs/HA_PAAS_PARITY_2026-11-10.md) 說明全新實例的實測與尚未對齊之處。PaaS 租戶範本釘住 chart `0.2.26`、cloud 映像 `20261101.1152`、PG17.11；取得 JCR 授權後，在全新空資料卷使用[釘版配置](config/profiles/tenant-cloud.profile)。先填 `WOOW_ODOO_DEFAULT_DB=odoo` 與實際的 `WOOW_ODOO_ADMIN_LOGIN`。tenant 模式由 `init-db.py` 建庫及建立指定管理員，之後才設定 `db_name=odoo`、檢查 C 排序規則和 `pg_trgm`／`vector`，並設定 `list_db=False`、`dbfilter=^odoo$`。釘版 cloud 映像有 7 顆租戶模組；另有來自較新 CI main、含 13 顆模組的舊候選映像，兩者不可混同。若要再加入公開 HA 的 7 顆範例模組，以有權限的 cloud 映像為底層執行：
+[功能對照紀錄](docs/HA_PAAS_PARITY_2026-11-10.md) 說明全新實例的實測與尚未對齊之處。PaaS 租戶範本釘住 chart `0.2.26`、cloud 映像 `20261101.1152`、PG17.11；取得 JCR 授權後，在全新空資料卷使用[釘版配置](config/profiles/tenant-cloud.profile)。先填 `WOOW_ODOO_DEFAULT_DB=odoo` 與實際的 `WOOW_ODOO_ADMIN_LOGIN`。tenant 模式以 `postgres` 初始化獨立資料卷，建立受限 `odoo` 角色與 C 排序規則資料庫，僅在全新庫跑一次 `-i base`，並於 web 啟動前設定管理員 secret；之後固定 `db_name=odoo`、`list_db=False`、`dbfilter=^odoo$`。釘版 cloud 映像有 7 顆租戶模組；另有來自較新 CI main、含 13 顆模組的舊候選映像，兩者不可混同。若要再加入公開 HA 的 7 顆範例模組，以有權限的 cloud 映像為底層執行：
 
 ```bash
 scripts/build-ha-cloud-image.sh <帶-digest-的-cloud-映像> <固定-51856b0-且乾淨的-odoo-addons-checkout> localhost/woow-odoo-ha-cloud:local
@@ -120,7 +120,7 @@ scripts/build-ha-cloud-image.sh <帶-digest-的-cloud-映像> <固定-51856b0-�
 
 把腳本輸出的本機 digest 設為 `WOOW_ODOO_IMAGE` 後，以 `scripts/install.sh` 建立新庫。可設定 `WOOW_ODOO_GATEWAY_ENABLED=True`；Odoo 本體仍應綁回圈位址，入口預設為 `127.0.0.1:18080`。這組映像**未包含** PaaS platform 的約 40 顆模組與外部 `woow_paas_platform`；私有 PaaS 原始碼與憑證不會進入公開倉庫。
 
-Podman 目前把資料庫角色 `odoo` 初始化為 PostgreSQL superuser；PaaS 把資料庫 superuser 與 Odoo 角色分開，現有 tenant 模式尚未對齊這項隔離及中斷恢復、升級閘。
+若既有 tenant 資料卷以 `odoo` 作為 PostgreSQL 初始超級使用者（OID 10），無法直接降權。執行 `scripts/migrate-tenant-db-role.sh`：腳本先備份，再於新卷還原、核對權限與資料後切換，並保留舊卷供回退。此流程已在 rootless Podman 主機實測。
 
 ### Addons 與 rootless 權限
 
@@ -146,7 +146,8 @@ podman exec odoo18-web odoo -c /etc/odoo/odoo.conf -d <資料庫> -u <模組> --
 
 | Podman secret | 內容 | 如何傳入容器 |
 |---|---|---|
-| `odoo18-postgres-password` | 資料庫角色 `odoo` 的密碼 | 掛載於 `/run/secrets/postgres_password`；初始化資料卷時 PostgreSQL 透過 `POSTGRES_PASSWORD_FILE` 讀取 |
+| `odoo18-postgres-password` | 資料庫角色 `odoo` 的密碼 | 算進 Odoo 設定；一般模式也用於 PostgreSQL 初始設定 |
+| `odoo18-postgres-super-password` | tenant 資料庫管理員密碼 | 只掛載於資料庫容器，不給 Odoo |
 | `odoo18-admin-password` | Odoo 主控（資料庫管理）密碼 | 不掛載，只算進 conf |
 | `odoo18-odoo-conf` | 算好的 `/etc/odoo/odoo.conf` | 唯讀掛載，擁有者 `odoo`、權限 0400 |
 | `odoo18-gateway-conf` | 可選 nginx 設定 | 唯讀掛載於入口容器 |
@@ -174,12 +175,13 @@ tests/smoke.sh --quick  # 只檢查單元、健康、埠與 HTTP
 
 ```bash
 git pull
-scripts/upgrade.sh                     # 需要時加 --update-modules，對每個資料庫執行 odoo -u all
+scripts/upgrade.sh                     # 一般模式可加 --update-modules
 ```
 
 流程為：備份 → 保存已安裝的單元 → 執行 `install.sh`（先拉新的釘版映像）→ 對每個資料庫執行
 `ALTER EXTENSION vector UPDATE` → smoke 測試。任何一步失敗就放回原本的單元，並以原本的映像重啟 Odoo。
 新版 Odoo 已遷移過的資料庫不會自動回復，請用升級前的備份還原。
+tenant 模式在 web 開放前依映像 digest 與 Odoo core 日期檢查升級；新 digest 先核對 addon 來源，執行有時間上限的 `-u all`，完整驗證模組後才寫完成標記。同 digest 跳過，失敗三次或 core 降版則拒絕。tenant 更換映像時一律用 `scripts/upgrade.sh`，先取得升級前備份。
 
 ## 備份與還原
 
@@ -193,9 +195,20 @@ scripts/restore.sh --archive ~/.local/share/woow-backups/odoo18/odoo18-<stamp>.t
 含映像 digest 的 `metadata.json`，以及 `SHA256SUMS`。封存前與還原前都會驗證
 （`scripts/validate-backup.py`：不得有符號連結、不得路徑穿越、檢查校驗碼與 PostgreSQL dump 格式）。
 
-還原會刪除並重建封存檔中的資料庫、換掉其 filestore、把資料庫角色密碼設回本機目前的 secret，並進行驗證。
+一般模式的還原會刪除並重建封存檔中的資料庫、換掉其 filestore、把資料庫角色密碼設回本機目前的 secret，並進行驗證。
 若在第一次變更之後失敗，會自動還原它在開始時建立的「還原前封存檔」；若連回復都失敗，Odoo 會保持停止，
 以免提供混合狀態。不在封存檔中的資料庫不會被動到，並會列出提醒。
+
+tenant 模式使用線上預備還原。`restore.sh` 會連續預備與切換；需要先驗收再切換時使用：
+
+```bash
+scripts/restore-online.sh --stage --archive <備份.tar> --request <代號>
+scripts/restore-online.sh --switch --request <代號> --confirm-restore odoo18
+scripts/restore-online.sh --rollback --request <代號> --confirm-restore odoo18
+scripts/restore-online.sh --discard --request <代號> --confirm-restore odoo18
+```
+
+預備時正式 web 繼續服務，會驗證封存、映像、模組版本、附件與資料庫身分；預備結果 24 小時後失效。切換時會短暫停止 web／gateway，在同一筆交易中改名資料庫並交換 filestore，再做健康檢查；失敗則嘗試自動回退。成功切換後舊資料保留 24 小時，可用 `--finalize --request <代號> --confirm-restore odoo18` 清除。tenant 還原沿用本機憑證，`--restore-secrets` 僅適用一般模式。
 
 可選用每日備份計時器（台北時間 02:00 起，最多延後三小時以錯開執行）：
 

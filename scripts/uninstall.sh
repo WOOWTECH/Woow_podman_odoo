@@ -5,7 +5,7 @@
 #                                                 secrets, images, the addons dir, ~/.config/odoo18
 #                                                 and every backup
 #   scripts/uninstall.sh --purge --confirm-purge odoo18   (or --purge --yes)
-#                                                 also delete both volumes, the network, the odoo18-*
+#                                                 also delete the managed volumes, the network, the odoo18-*
 #                                                 secrets and ~/.config/odoo18, after a final cold
 #                                                 backup of both volumes and the env file
 #   scripts/uninstall.sh --dry-run                report what would be removed
@@ -51,7 +51,7 @@ if [[ ${QL_DRY_RUN:-0} != 1 ]]; then
   final=$(app_new_backup_dir final)
   # Cold copies: both containers stop first, so the database files are consistent.
   systemctl --user stop odoo.service odoo-db.service >/dev/null 2>&1 || true
-  for v in odoo18-db-data odoo18-web-data; do
+  for v in odoo18-db-data odoo18-db-data-isolated odoo18-web-data; do
     if podman volume exists "$v"; then ql_backup_volume "$v" "$final" >/dev/null; fi
   done
   if [[ -f $ENV_FILE ]]; then install -m 600 -- "$ENV_FILE" "$final/${ENV_FILE##*/}"; fi
@@ -62,6 +62,11 @@ ql_uninstall_units "$APP" --purge
 if [[ ${QL_DRY_RUN:-0} == 1 ]]; then
   ql_info "[dry-run] --purge would also remove $HOME/.config/$APP"
 else
+  if podman volume exists odoo18-db-data && \
+      [[ $(podman volume inspect --format '{{index .Labels "io.woowtech.stack"}}' odoo18-db-data) == odoo18 ]]; then
+    podman volume rm odoo18-db-data >/dev/null \
+      || ql_die 'could not purge the retained pre-isolation database volume'
+  fi
   rm -rf -- "$HOME/.config/$APP"
   ql_info "removed $HOME/.config/$APP (a copy of the env file is in the final backup); the addons dir is kept"
 fi

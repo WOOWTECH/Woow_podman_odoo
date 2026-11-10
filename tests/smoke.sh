@@ -126,11 +126,16 @@ fi
 
 db_pw=$(app_secret_read odoo18-postgres-password || true)
 admin_pw=$(app_secret_read odoo18-admin-password || true)
+super_pw=''
+if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+  super_pw=$(app_secret_read odoo18-postgres-super-password || true)
+  [[ -n $super_pw ]] || fail 'T0 PostgreSQL superuser secret is missing'
+fi
 [[ -n $db_pw && -n $admin_pw ]] || fail "A5 secrets odoo18-postgres-password / odoo18-admin-password are missing"
 
 # A5 secret hygiene: inspect, process arguments, journal, container logs, tracked files
 leaks=()
-contains() { [[ -n $db_pw && $1 == *"$db_pw"* ]] || [[ -n $admin_pw && $1 == *"$admin_pw"* ]]; }
+contains() { [[ -n $db_pw && $1 == *"$db_pw"* ]] || [[ -n $admin_pw && $1 == *"$admin_pw"* ]] || [[ -n $super_pw && $1 == *"$super_pw"* ]]; }
 contains "$(podman inspect odoo18-db odoo18-web 2>/dev/null || true)" && leaks+=("podman inspect")
 contains "$(podman top odoo18-db args 2>/dev/null; podman top odoo18-web args 2>/dev/null)" && leaks+=("process arguments")
 contains "$(journalctl --user -u odoo.service -u odoo-db.service -o cat --no-pager 2>/dev/null || true)" && leaks+=("journal")
@@ -169,24 +174,36 @@ elif [[ -n $admin_pw ]]; then
   out=$(rpc admin)
   if [[ $out == *AccessDenied* || $out == *'Access Denied'* ]]; then pass "A7 master password 'admin' is rejected"; else fail "A7 master password 'admin' was not rejected"; fi
 fi
-unset db_pw admin_pw
+unset db_pw admin_pw super_pw
 
 # A8 pgvector is available at the version shipped by the running database image.
-want_vec=$(podman exec odoo18-db psql -X -U odoo -d postgres -Atqc \
+db_actor=odoo
+[[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) != True ]] || db_actor=postgres
+want_vec=$(podman exec odoo18-db psql -X -U "$db_actor" -d postgres -Atqc \
   "SELECT default_version FROM pg_available_extensions WHERE name='vector'" 2>/dev/null || true)
 [[ -n $want_vec ]] || fail 'A8 running PostgreSQL image has no pgvector extension'
 probe_db=woow_smoke_vector_$$
-if podman exec odoo18-db createdb -U odoo "$probe_db" >/dev/null 2>&1 \
-  && got=$(podman exec odoo18-db psql -X -U odoo -d "$probe_db" -v ON_ERROR_STOP=1 -Atqc \
+if podman exec odoo18-db createdb -U "$db_actor" "$probe_db" >/dev/null 2>&1 \
+  && got=$(podman exec odoo18-db psql -X -U "$db_actor" -d "$probe_db" -v ON_ERROR_STOP=1 -Atqc \
     "CREATE EXTENSION vector; SELECT extversion FROM pg_extension WHERE extname = 'vector'" 2>/dev/null) \
   && [[ -n $want_vec && $got == "$want_vec" ]]; then
   pass "A8 pgvector $want_vec works"
 else
   fail "A8 pgvector: expected $want_vec, got '${got:-error}'"
 fi
-podman exec odoo18-db dropdb -U odoo --if-exists "$probe_db" >/dev/null 2>&1 && probe_db=''
+podman exec odoo18-db dropdb -U "$db_actor" --if-exists "$probe_db" >/dev/null 2>&1 && probe_db=''
 
 if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+  flags=$(podman exec odoo18-db psql -X -U postgres -d postgres -Atqc \
+    "SELECT rolsuper || ',' || rolcreatedb || ',' || rolcreaterole FROM pg_roles WHERE rolname='odoo'" 2>/dev/null || true)
+  if [[ $flags == false,false,false ]]; then pass 'T0 Odoo database role has no superuser/create privileges'; else fail "T0 Odoo role flags: ${flags:-missing}"; fi
+  denied_db="woow_denied_$$_$RANDOM"
+  if podman exec odoo18-db createdb -U odoo "$denied_db" >/dev/null 2>&1; then
+    fail 'T0 Odoo role can create a database'
+    podman exec odoo18-db dropdb -U postgres --if-exists "$denied_db" >/dev/null 2>&1 || true
+  else
+    pass 'T0 Odoo role cannot create a database'
+  fi
   tenant_db=$(ql_env_get WOOW_ODOO_DEFAULT_DB)
   collate=$(podman exec odoo18-db psql -X -U odoo -d postgres -Atqc \
     "SELECT datcollate FROM pg_database WHERE datname = '$tenant_db'" 2>/dev/null || true)

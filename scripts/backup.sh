@@ -36,6 +36,13 @@ done
 ((include_secrets == 0 || automated == 0)) || ql_die "--automated cannot include secrets"
 ql_require_rootless
 ql_lock "$APP"
+app_env_load
+tenant_cloud=$(ql_env_get WOOW_ODOO_TENANT_CLOUD False)
+role_model=legacy-superuser
+if [[ $tenant_cloud == True && $(podman exec odoo18-db psql -X -U postgres -d postgres -Atqc \
+  "SELECT rolsuper FROM pg_roles WHERE rolname='odoo'" 2>/dev/null) == f ]]; then
+  role_model=tenant-restricted
+fi
 ql_wait_container_healthy odoo18-db 120 \
   || ql_die "odoo18-db did not become healthy within 120 seconds; refusing to back up"
 web_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-web 2>/dev/null || echo false)
@@ -77,7 +84,12 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 root=$staging/odoo18-backup-$stamp
 mkdir -p "$root/databases" "$root/volume"
 
-podman exec odoo18-db pg_dumpall -U odoo --roles-only >"$root/roles.sql"
+if [[ $role_model == tenant-restricted ]]; then
+  # The tenant archive never transports superuser or role passwords. The installer owns roles.
+  printf '%s\n' '-- Tenant roles are managed by scripts/install.sh; no role SQL is restored.' >"$root/roles.sql"
+else
+  podman exec odoo18-db pg_dumpall -U odoo --roles-only >"$root/roles.sql"
+fi
 [[ -s $root/roles.sql ]] || ql_die "pg_dumpall --roles-only produced nothing"
 dbs_raw=$(odoo_databases) || ql_die "cannot list the databases"
 mapfile -t dbs < <(printf '%s' "$dbs_raw" | grep -v '^[[:space:]]*$' || true)
@@ -86,8 +98,18 @@ if ((${#dbs[@]} == 0)); then
 fi
 for db in "${dbs[@]}"; do
   [[ $db =~ ^[A-Za-z0-9_.-]+$ ]] || ql_die "refusing to back up a database with an unusual name: $db"
-  # --file=- would be a literal file named "-" in this image, so the dump is streamed on stdout.
-  podman exec odoo18-db pg_dump -U odoo --format=custom "$db" >"$root/databases/$db.dump"
+  # Keep the complete archive inside the container until pg_dump exits. On some Podman 4.9
+  # hosts a large `podman exec` stdout stream can end before its final bytes are copied.
+  tmp_dump=/tmp/odoo18-backup-$$-$db.dump
+  if ! podman exec odoo18-db pg_dump -U odoo --format=custom --file="$tmp_dump" "$db"; then
+    podman exec odoo18-db rm -f -- "$tmp_dump" >/dev/null 2>&1 || true
+    ql_die "could not dump database $db"
+  fi
+  if ! podman cp "odoo18-db:$tmp_dump" "$root/databases/$db.dump"; then
+    podman exec odoo18-db rm -f -- "$tmp_dump" >/dev/null 2>&1 || true
+    ql_die "could not copy the complete dump of $db"
+  fi
+  podman exec odoo18-db rm -f -- "$tmp_dump"
   [[ $(head -c 5 "$root/databases/$db.dump") == PGDMP ]] || ql_die "the dump of $db is not in PostgreSQL custom format"
   ql_info "dumped database $db ($(du -h "$root/databases/$db.dump" | cut -f1))"
 done
@@ -101,6 +123,10 @@ if ((include_secrets)); then
   for s in odoo18-postgres-password odoo18-admin-password; do
     (umask 077 && app_secret_read "$s" >"$root/secrets/${s#odoo18-}") || ql_die "cannot read secret $s"
   done
+  if [[ $role_model == tenant-restricted ]]; then
+    (umask 077 && app_secret_read odoo18-postgres-super-password >"$root/secrets/postgres-super-password") \
+      || ql_die 'cannot read PostgreSQL superuser secret'
+  fi
   for db in "${dbs[@]}"; do
     secret="odoo18-$db-admin-password"
     if podman secret exists "$secret"; then
@@ -118,8 +144,9 @@ for db in "${dbs[@]}"; do dblist+="\"$db\","; done
 dblist=${dblist%,}
 secrets_json=false
 ((include_secrets == 0)) || secrets_json=true
-printf '{"project":"odoo18","created_utc":"%s","databases":[%s],"images":{"odoo":"%s","database":"%s"},"secrets_included":%s}\n' \
-  "$stamp" "$dblist" "$actual_odoo_image" "$actual_db_image" "$secrets_json" >"$root/metadata.json"
+printf '{"project":"odoo18","created_utc":"%s","databases":[%s],"images":{"odoo":"%s","database":"%s"},"secrets_included":%s,"role_model":"%s"}\n' \
+  "$stamp" "$dblist" "$actual_odoo_image" "$actual_db_image" "$secrets_json" \
+  "$role_model" >"$root/metadata.json"
 
 podman unshare bash -c 'cd "$1"; find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | while IFS= read -r -d "" f; do sha256sum "${f#./}"; done >SHA256SUMS' sh "$root"
 podman unshare find "$root" -type d -exec chmod 700 {} +

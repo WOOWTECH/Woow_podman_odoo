@@ -36,6 +36,20 @@ check "tenant profile pins the published cloud image" has_line tenant-pinned odo
   'Image=jcr-prod.woowtech.io/woow-paas-docker-local/cloud-odoo:20261101.1152@sha256:5a0c0f9bed994688230b0d4869ab7f442381f2953149133842bb16065ed37316'
 check "tenant profile pins the published PG17 image" has_line tenant-pinned odoo-db.container \
   'Image=jcr-prod.woowtech.io/woow-paas-docker-local/paas-postgres:17.11-20260928.1549@sha256:dbd1fed8882043f45bf759e8f7c73092505ef0afef7a23a93b177e6f7c2c840f'
+check "generic profile keeps its existing database volume" has_line example odoo-db-data.volume \
+  'VolumeName=odoo18-db-data'
+check "tenant profile uses a postgres-owned isolated volume" has_line tenant-pinned odoo-db-data.volume \
+  'VolumeName=odoo18-db-data-isolated'
+check "tenant database bootstraps as postgres" has_line tenant-pinned odoo-db.container \
+  'Environment=POSTGRES_USER=postgres'
+check "tenant database alone mounts its superuser secret" has_line tenant-pinned odoo-db.container \
+  'Secret=odoo18-postgres-super-password,type=mount,target=postgres_password,uid=999,gid=999,mode=0400'
+check "Odoo never mounts the superuser secret" bash -c \
+  "! grep -q 'odoo18-postgres-super-password' '$WORK/tenant-pinned/out/odoo.container'"
+check "tenant Odoo gate runs before every service start" has_line tenant-pinned odoo.container \
+  "ExecStartPre=%h/${REPO#"$HOME/"}/scripts/upgrade-gate.sh --image jcr-prod.woowtech.io/woow-paas-docker-local/cloud-odoo:20261101.1152@sha256:5a0c0f9bed994688230b0d4869ab7f442381f2953149133842bb16065ed37316"
+check "generic Odoo service has no tenant upgrade gate" bash -c \
+  "! grep -q '^ExecStartPre=.*upgrade-gate.sh' '$WORK/example/out/odoo.container'"
 check "the database publishes no port" bash -c "! grep -q '^PublishPort=' '$WORK/example/out/odoo-db.container'"
 check "no unit is named odoo18 (a legacy odoo18.service would shadow it)" \
   bash -c "! ls '$REPO'/quadlet | grep -qE '^odoo18\\.(container|service)$'"

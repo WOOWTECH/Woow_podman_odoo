@@ -16,12 +16,13 @@ Network=odoo.network
 HostName=odoo18-db
 Label=io.woowtech.stack=odoo18
 Volume=odoo-db-data.volume:/var/lib/postgresql/data
-Environment=POSTGRES_USER=odoo
+Environment=POSTGRES_USER=@@DB_BOOTSTRAP_USER@@
 Environment=POSTGRES_DB=postgres
+Environment=POSTGRES_INITDB_ARGS=--data-checksums
 # Read only when an empty volume is initialised; the password never enters the container config.
 Environment=POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
-Secret=odoo18-postgres-password,type=mount,target=postgres_password,uid=999,gid=999,mode=0400
-HealthCmd=pg_isready -U odoo -d postgres
+Secret=@@DB_BOOTSTRAP_SECRET@@,type=mount,target=postgres_password,uid=999,gid=999,mode=0400
+HealthCmd=pg_isready -U @@DB_BOOTSTRAP_USER@@ -d postgres
 HealthInterval=10s
 HealthTimeout=5s
 HealthRetries=12
