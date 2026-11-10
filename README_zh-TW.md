@@ -112,7 +112,7 @@ PaaS cloud 映像應從有權限的 `paas-odoo-ci` 原始碼及 `Dockerfile.clou
 
 ### 全新 HA 與 PaaS cloud 模組組合
 
-[功能對照紀錄](docs/HA_PAAS_PARITY_2026-11-10.md) 說明全新實例的實測與尚未對齊之處。PaaS 租戶範本釘住 chart `0.2.26`、cloud 映像 `20261101.1152`、PG17.11；取得 JCR 授權後，應在全新空資料卷使用[釘版配置](config/profiles/tenant-cloud.profile)。先填 `WOOW_ODOO_DEFAULT_DB=odoo` 與實際的 `WOOW_ODOO_ADMIN_LOGIN`。tenant 模式會固定 `db_name=odoo`，建庫後檢查 C 排序規則及 `pg_trgm`、`vector`，再自動設定 `list_db=False`、`dbfilter=^odoo$`。目前本機候選映像依較新的 CI main 快照建置，有 13 顆模組，**並非**租戶範本釘定的映像。若要再加入公開 HA 的 7 顆範例模組，以有權限的 cloud 映像為底層執行：
+[功能對照紀錄](docs/HA_PAAS_PARITY_2026-11-10.md) 說明全新實例的實測與尚未對齊之處。PaaS 租戶範本釘住 chart `0.2.26`、cloud 映像 `20261101.1152`、PG17.11；取得 JCR 授權後，在全新空資料卷使用[釘版配置](config/profiles/tenant-cloud.profile)。先填 `WOOW_ODOO_DEFAULT_DB=odoo` 與實際的 `WOOW_ODOO_ADMIN_LOGIN`。tenant 模式由 `init-db.py` 建庫及建立指定管理員，之後才設定 `db_name=odoo`、檢查 C 排序規則和 `pg_trgm`／`vector`，並設定 `list_db=False`、`dbfilter=^odoo$`。釘版 cloud 映像有 7 顆租戶模組；另有來自較新 CI main、含 13 顆模組的舊候選映像，兩者不可混同。若要再加入公開 HA 的 7 顆範例模組，以有權限的 cloud 映像為底層執行：
 
 ```bash
 scripts/build-ha-cloud-image.sh <帶-digest-的-cloud-映像> <固定-51856b0-且乾淨的-odoo-addons-checkout> localhost/woow-odoo-ha-cloud:local
@@ -185,7 +185,7 @@ scripts/upgrade.sh                     # 需要時加 --update-modules，對每�
 
 ```bash
 scripts/backup.sh                      # 停止 Odoo、逐一 dump 每個資料庫、複製 filestore、驗證
-scripts/backup.sh --include-secrets    # 另外把兩組密碼放進封存檔（請當成密碼保管）
+scripts/backup.sh --include-secrets    # 另存資料庫、主控與現有首位管理員密碼（請當成密碼保管）
 scripts/restore.sh --archive ~/.local/share/woow-backups/odoo18/odoo18-<stamp>.tar --confirm-restore odoo18
 ```
 

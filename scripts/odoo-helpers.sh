@@ -51,7 +51,10 @@ odoo_render_conf_secret() {
   workers=$(ql_env_get WOOW_ODOO_WORKERS 0)
   cron=$(ql_env_get WOOW_ODOO_MAX_CRON_THREADS 1)
   db_name_line=''
-  if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+  # Setting db_name on the first start makes Odoo initialize the database itself with
+  # its default admin/admin account, before init-db.py can set the requested login.
+  # Pin the name only after the database manager has created and verified it.
+  if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True && $list == False ]]; then
     db_name_line="db_name = $(ql_env_get WOOW_ODOO_DEFAULT_DB)"
   fi
   db_filter_line=''

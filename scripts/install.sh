@@ -214,6 +214,9 @@ if [[ $gateway_enabled == True ]]; then
   entry_url="http://$gateway_host:$gateway_port/"
   entry_note='gateway; create a database with scripts/init-db.py (database manager is blocked here)'
 fi
+if [[ -n $default_db ]]; then
+  entry_note="database $default_db initialized; sign in with $(ql_env_get WOOW_ODOO_ADMIN_LOGIN)"
+fi
 cat >&2 <<EOF
 $APP is installed and healthy.
   Odoo             $entry_url   ($entry_note)

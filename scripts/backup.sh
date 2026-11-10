@@ -101,7 +101,16 @@ if ((include_secrets)); then
   for s in odoo18-postgres-password odoo18-admin-password; do
     (umask 077 && app_secret_read "$s" >"$root/secrets/${s#odoo18-}") || ql_die "cannot read secret $s"
   done
-  ql_warn "the archive contains both passwords (--include-secrets): keep it as private as a password"
+  for db in "${dbs[@]}"; do
+    secret="odoo18-$db-admin-password"
+    if podman secret exists "$secret"; then
+      mkdir -p -m 700 "$root/secrets/db-admin"
+      (umask 077 && app_secret_read "$secret" >"$root/secrets/db-admin/$db") \
+        || ql_die "cannot read first administrator secret for $db"
+      [[ -s $root/secrets/db-admin/$db ]] || ql_die "first administrator secret for $db is empty"
+    fi
+  done
+  ql_warn "the archive contains database, master and available first administrator passwords; keep it private"
 fi
 
 dblist=''

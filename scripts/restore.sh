@@ -6,8 +6,9 @@
 #
 #   scripts/restore.sh --archive FILE --confirm-restore odoo18 [--restore-secrets]
 #
-#   --restore-secrets  also put the passwords from the archive (--include-secrets) into the podman
-#                      secrets and re-render odoo.conf. Without it the archive's roles are loaded and
+#   --restore-secrets  also put the database, master and first administrator passwords from the
+#                      archive (--include-secrets) into podman secrets and re-render odoo.conf.
+#                      Without it the archive's roles are loaded and
 #                      the database role is then set back to this host's current password.
 #
 # Every database in the archive is dropped and recreated. Databases that are not in the archive are
@@ -39,6 +40,7 @@ archive=$(realpath -- "$archive")
 [[ -f $archive ]] || ql_die "archive not found: $archive"
 ql_require_rootless
 ql_lock "$APP"
+app_env_load
 rollback_mode=${ODOO_RESTORE_ROLLBACK:-false}
 
 stage_parent=$(mktemp -d "$BACKUP_ROOT/.restore.XXXXXX")
@@ -53,8 +55,10 @@ cleanup() {
     systemctl --user stop odoo.service >/dev/null 2>&1
     if ((mutation_started)) && [[ $rollback_mode == false && -n $pre_restore ]]; then
       ql_warn "restore failed after the first change; restoring the pre-restore archive"
+      rollback_args=()
+      ((restore_secrets == 0)) || rollback_args+=(--restore-secrets)
       if ODOO_RESTORE_ROLLBACK=true ODOO_RESTORE_MUTATED_ROLES="$stage/roles.sql" \
-        "$REPO/scripts/restore.sh" --archive "$pre_restore" --confirm-restore "$APP"; then
+        "$REPO/scripts/restore.sh" --archive "$pre_restore" --confirm-restore "$APP" "${rollback_args[@]}"; then
         ql_warn "the pre-restore state is back and verified"
         if [[ $gateway_was_running == true ]]; then
           systemctl --user start odoo-gateway.service >/dev/null 2>&1 || ql_warn "could not start odoo-gateway.service after rollback"
@@ -96,7 +100,10 @@ systemctl --user stop odoo.service
   || ql_die "odoo18-db is not healthy; refusing to restore"
 # The pre-restore snapshot is taken while Odoo is already stopped, so it is one quiesced point in time.
 if [[ $rollback_mode == false ]]; then
-  pre_restore=$("$REPO/scripts/backup.sh") || ql_die "the pre-restore backup failed; nothing was changed"
+  backup_args=()
+  ((restore_secrets == 0)) || backup_args+=(--include-secrets)
+  pre_restore=$("$REPO/scripts/backup.sh" "${backup_args[@]}") \
+    || ql_die "the pre-restore backup failed; nothing was changed"
   ql_info "pre-restore archive: $pre_restore"
 fi
 
@@ -118,7 +125,20 @@ if ((restore_secrets)); then
     podman secret create --replace --label "io.woowtech.app=$APP" "odoo18-$s-password" "$stage/secrets/$s-password" >/dev/null \
       || ql_die "cannot replace secret odoo18-$s-password"
   done
-  ql_info "replaced both password secrets from the archive"
+  if [[ -d $stage/secrets/db-admin ]]; then
+    while IFS= read -r -d '' first_admin; do
+      db=${first_admin##*/}
+      [[ $db =~ ^[a-z][a-z0-9_]{0,62}$ ]] \
+        || ql_die "unsafe first administrator secret name in archive"
+      printf '%s\n' "${dbs[@]}" | grep -qxF "$db" \
+        || ql_die "first administrator secret in archive has no matching database"
+      [[ -s $first_admin ]] || ql_die "first administrator secret for $db is empty"
+      podman secret create --replace --label "io.woowtech.app=$APP" \
+        "odoo18-$db-admin-password" "$first_admin" >/dev/null \
+        || ql_die "cannot replace first administrator secret for $db"
+    done < <(find "$stage/secrets/db-admin" -mindepth 1 -maxdepth 1 -type f -print0)
+  fi
+  ql_info "restored database, master and available first administrator password secrets"
 fi
 # The archived roles carry the password of the backup host; make the role match this host's secret.
 odoo_set_role_password || ql_die "could not set the database role password"
@@ -128,7 +148,12 @@ mountpoint=$(podman volume inspect --format '{{.Mountpoint}}' odoo18-web-data)
 for db in "${dbs[@]}"; do
   [[ $db =~ ^[A-Za-z0-9_.-]+$ ]] || ql_die "refusing to restore a database with an unusual name: $db"
   podman exec odoo18-db dropdb -U odoo --if-exists --force "$db"
-  podman exec odoo18-db createdb -U odoo -O odoo "$db"
+  if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+    podman exec odoo18-db createdb -U odoo -O odoo --template=template0 \
+      --lc-collate=C --lc-ctype=en_US.utf8 "$db"
+  else
+    podman exec odoo18-db createdb -U odoo -O odoo "$db"
+  fi
   podman exec -i odoo18-db pg_restore -U odoo --exit-on-error --single-transaction -d "$db" <"$stage/databases/$db.dump"
   ql_info "restored database $db"
   # Filestore for this database only; other databases keep theirs.

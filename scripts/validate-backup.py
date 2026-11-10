@@ -3,7 +3,8 @@
 
 Harvested from the hardened compose deployment and adapted to the Quadlet layout: an archive holds
 one dump per Odoo database under databases/, the roles dump, the web volume, metadata and the
-checksum manifest, plus the two passwords when it was made with --include-secrets.
+checksum manifest, plus the database, master and available first administrator
+passwords when it was made with --include-secrets.
 """
 import argparse
 import hashlib

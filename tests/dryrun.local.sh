@@ -59,6 +59,29 @@ check "the conf includes curated image and host addons" grep -qx \
 check "worker and cron counts render" bash -c "grep -qx 'workers = 2' <<<\"\$1\" && grep -qx 'max_cron_threads = 2' <<<\"\$1\"" _ "$conf"
 check "tenant database and timeout limits render" bash -c "grep -Fqx 'dbfilter = ^odoo$' <<<\"\$1\" && grep -Fqx 'db_maxconn = 8' <<<\"\$1\" && grep -Fqx 'limit_time_real_cron = 600' <<<\"\$1\"" _ "$conf"
 check "tenant database name renders" grep -Fqx 'db_name = odoo' <<<"$conf"
+
+# Exercise the installer's real config renderer. A fresh tenant must let init-db.py
+# create the database, or Odoo starts it first with the default admin/admin login.
+render_tenant_conf() (
+  local env_file=$1 out=$2
+  # shellcheck source=../scripts/common.sh
+  . "$REPO/scripts/common.sh"
+  # shellcheck source=../scripts/odoo-helpers.sh
+  . "$REPO/scripts/odoo-helpers.sh"
+  app_secret_read() { printf '%s' 'test-only-password'; }
+  ql_secret_ensure() { printf '%s\n' "$ODOO_CONF" >"$out"; }
+  ql_env_load "$env_file"
+  odoo_render_conf_secret
+)
+render_tenant_conf "$tenant_env" "$WORK/tenant-first.conf"
+check "fresh tenant leaves db_name unset for controlled bootstrap" \
+  bash -c "grep -Fqx 'list_db = True' '$WORK/tenant-first.conf' && ! grep -q '^db_name = ' '$WORK/tenant-first.conf'"
+sed -e 's/^WOOW_ODOO_LIST_DB=True/WOOW_ODOO_LIST_DB=False/' \
+    -e 's/^WOOW_ODOO_DB_FILTER=.*/WOOW_ODOO_DB_FILTER=^odoo$/' \
+    "$tenant_env" >"$WORK/tenant-locked.env"
+render_tenant_conf "$WORK/tenant-locked.env" "$WORK/tenant-locked.conf"
+check "locked tenant pins the initialized database" \
+  bash -c "grep -Fqx 'list_db = False' '$WORK/tenant-locked.conf' && grep -Fqx 'db_name = odoo' '$WORK/tenant-locked.conf' && grep -Fqx 'dbfilter = ^odoo$' '$WORK/tenant-locked.conf'"
 check "SMTP is absent until configured" bash -c "! grep -q '^smtp_' <<<\"\$1\"" _ "$conf"
 check "no default master password in the template" bash -c "! grep -qE '^admin_passwd *= *admin *\$' '$REPO/config/odoo.conf.template'"
 
