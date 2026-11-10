@@ -11,12 +11,13 @@ ENV_EXAMPLE=$REPO/config/$APP.env.example
 ENV_FILE=$HOME/.config/$APP/$APP.env
 BACKUP_ROOT=$HOME/.local/share/woow-backups/$APP
 # container:unit pairs the units create (legacy-collision guard)
-CONTAINERS=("odoo18-db:odoo-db.service" "odoo18-web:odoo.service")
+CONTAINERS=("odoo18-db:odoo-db.service" "odoo18-web:odoo.service" "odoo18-gateway:odoo-gateway.service")
 # env keys allowed to carry user-supplied credentials (ERE on the whole key; empty = none)
 ENV_CREDENTIAL_ALLOW=''
 # images, for backup metadata and the image-account probe (tests/lint-repo.sh checks they match quadlet/)
 DB_IMAGE=docker.io/pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9
 ODOO_IMAGE=docker.io/library/odoo:18.0-20260817@sha256:259fa933bf3ee7f3e375bd74d1e0bc28bd75955159723be477359e0fdb8acf67
+REPO_GATEWAY_IMAGE=docker.io/nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
 # ------------------------------------------------------------------------------------------------
 export QL_APP=$APP
 

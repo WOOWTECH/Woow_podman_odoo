@@ -70,6 +70,11 @@ master password is the `odoo18-admin-password` secret:
 podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-password
 ```
 
+For a fresh database with a generated administrator password held in a separate Podman secret,
+use `scripts/init-db.py --database my_odoo --admin-login me@example.com --lang zh_TW` after Odoo is
+healthy. It refuses to initialize an existing database. Its success message prints the command to
+retrieve the login password in a private terminal.
+
 Useful options:
 
 | Option | Effect |
@@ -88,11 +93,63 @@ Re-running `install.sh` is safe: with nothing changed it restarts nothing and ke
 |---|---|---|
 | `WOOW_ODOO_BIND` | `127.0.0.1` | Address Odoo is published on: `127.0.0.1`, an IPv4 address of this host, or `all`. |
 | `WOOW_ODOO_PORT` | `18069` | Host port for Odoo. |
+| `WOOW_ODOO_IMAGE` | empty (the pinned official Odoo image) | Optional prebuilt Odoo image with an explicit `@sha256:` digest. Use this for a curated PaaS-compatible module image after authenticating to its registry with Podman. The image must run Odoo as uid 100, gid 101. |
+| `WOOW_ODOO_DB_IMAGE` | empty (pinned PG16 image) | Optional digest-pinned database image for a **new** instance. The installer refuses a PostgreSQL major version that differs from an existing volume's `PG_VERSION`. |
+| `WOOW_ODOO_GATEWAY_ENABLED` | `False` | Optional nginx gateway. Requires `WOOW_ODOO_BIND=127.0.0.1`; denies `/web/database/*` and omits query strings from access logs. |
+| `WOOW_ODOO_GATEWAY_BIND`, `WOOW_ODOO_GATEWAY_PORT` | `127.0.0.1`, `18080` | Address of the optional gateway; place TLS termination before it if exposed. |
+| `WOOW_ODOO_WORKERS`, `WOOW_ODOO_MAX_CRON_THREADS` | `0`, `1` | Odoo web workers and cron threads. Positive worker count enables the gateway's port 8072 WebSocket route. |
+| `WOOW_ODOO_DB_MAXCONN`, `WOOW_ODOO_LIMIT_TIME_*`, `WOOW_ODOO_LIMIT_REQUEST` | generic defaults in the example env | Database connection pool and Odoo request/cron time limits. The pinned tenant profile sets the PaaS tenant values. |
+| `WOOW_ODOO_DB_FILTER` | empty | Optional anchored single-database filter such as `^odoo$`; set after first-run creation. |
+| `WOOW_ODOO_EMAIL_FROM`, `WOOW_ODOO_SMTP_*` | empty / port `587` / TLS `True` | Optional outbound SMTP. Store an authentication password in Podman secret `odoo18-smtp-password`, never in this env file. |
 | `WOOW_ODOO_ADDONS_DIR` | `%h/.local/share/odoo18/addons` | Host directory mounted read-only at `/mnt/extra-addons`. `%h` is your home. |
 | `WOOW_ODOO_LIST_DB` | `True` | `False` hides the database manager once your databases exist. |
+| `WOOW_ODOO_DEFAULT_DB` | empty | Optional first-run database name. With `WOOW_ODOO_ADMIN_LOGIN`, the installer creates it once through local XML-RPC. |
+| `WOOW_ODOO_ADMIN_LOGIN` | empty | First administrator login for `WOOW_ODOO_DEFAULT_DB`; its generated password is a Podman secret. |
+| `WOOW_ODOO_LANG` | `zh_TW` | Language for first-run database creation. |
+| `WOOW_ODOO_TENANT_CLOUD` | `False` | On a new tenant instance, require database `odoo`, verify C collation and pg_trgm/vector, then close the database manager. |
 
 Everything else (workers, memory limits, `proxy_mode`, ...) is in `config/odoo.conf.template`. Edit the
 template, then run `scripts/install.sh`: the conf secret is re-rendered and Odoo restarts.
+The config includes `/opt/woow/addons` and `/opt/woow/ha-addons` for modules baked into a curated image and
+`/mnt/extra-addons` for host modules. The stock image has no `/opt/woow/addons` directory.
+Registry credentials belong in Podman's private auth store, never in this env file.
+Automatic first-run creation requires `WOOW_ODOO_BIND=127.0.0.1` and `WOOW_ODOO_LIST_DB=True`.
+The installer keeps an existing initialized database and stops if it finds a partial one; it never
+reinitializes an existing database. After setup, you may hide the manager with `WOOW_ODOO_LIST_DB=False`.
+For a PaaS cloud image, build from an authorized `paas-odoo-ci` checkout with its
+`Dockerfile.cloud`; obtain its digest with `podman image inspect IMAGE --format '{{index .RepoDigests 0}}'`.
+Set `WOOW_ODOO_IMAGE` to that digest-pinned reference. On a host with existing data, edit this setting
+before running `scripts/upgrade.sh --update-modules` so the upgrade takes its cold backup and unit
+snapshot first. The module image and its registry permissions must remain available for every start.
+
+### Fresh HA and PaaS cloud profile
+
+The [capability comparison](docs/HA_PAAS_PARITY_2026-11-10.md) records what was verified on a **fresh**
+instance. The PaaS tenant template pins chart `0.2.26`, cloud image `20261101.1152` and PG17.11;
+use [the pinned profile](config/profiles/tenant-cloud.profile) on a new empty instance after obtaining
+JCR access. Fill `WOOW_ODOO_DEFAULT_DB=odoo` and a real `WOOW_ODOO_ADMIN_LOGIN` before installing.
+Tenant mode initializes PostgreSQL with the `postgres` superuser in
+`odoo18-db-data-isolated`, creates an unprivileged `odoo` role and a C-collation database,
+runs `-i base` once while the web is stopped, and sets the administrator from a Podman secret
+before serving. It then sets `db_name=odoo`, `list_db=False` and `dbfilter=^odoo$`.
+The selected cloud image has seven tenant addons; a separate
+later CI main candidate with 13 addons is not the pinned tenant image. To add the seven public HA sample modules to an authorized cloud
+image, use this repo's composition helper:
+
+```bash
+scripts/build-ha-cloud-image.sh <digest-pinned-cloud-image> <clean-WOOWTECH/odoo-addons-checkout-at-51856b0> localhost/woow-odoo-ha-cloud:local
+```
+
+The helper prints the local digest. Put it in `WOOW_ODOO_IMAGE` and run `scripts/install.sh` for a new
+database. Enable the gateway with `WOOW_ODOO_GATEWAY_ENABLED=True` while keeping Odoo on loopback.
+The local gateway listens on `127.0.0.1:18080` by default. This profile does **not** contain the
+PaaS platform image's 40 modules or its external `woow_paas_platform` module. Private PaaS code and
+credentials are never copied into this public repository.
+If an older tenant installation used `odoo` as PostgreSQL's bootstrap superuser (OID 10),
+PostgreSQL will not demote it. Run `scripts/migrate-tenant-db-role.sh`: it takes a verified
+backup, rebuilds into the isolated volume, validates the restricted role and data, switches
+the Quadlet, and retains the old volume for rollback. The migration was exercised on the
+rootless Podman host. [The comparison record](docs/HA_PAAS_PARITY_2026-11-10.md) has the checks.
 
 ### Addons and rootless permissions
 
@@ -120,9 +177,12 @@ podman exec odoo18-web odoo -c /etc/odoo/odoo.conf -d <database> -u <module> --s
 
 | Podman secret | What it is | How it reaches the container |
 |---|---|---|
-| `odoo18-postgres-password` | password of the database role `odoo` | mounted at `/run/secrets/postgres_password`; PostgreSQL reads it through `POSTGRES_PASSWORD_FILE` when the volume is initialised |
+| `odoo18-postgres-password` | password of the database role `odoo` | rendered into Odoo config; generic installations also use it for PostgreSQL bootstrap |
+| `odoo18-postgres-super-password` | tenant PostgreSQL administrator password | mounted only in the database container, never in Odoo |
 | `odoo18-admin-password` | Odoo master (database-manager) password | not mounted; it is rendered into the conf |
 | `odoo18-odoo-conf` | the rendered `/etc/odoo/odoo.conf` | mounted read-only, owner `odoo`, mode 0400 |
+| `odoo18-gateway-conf` | optional nginx config | mounted read-only in the gateway |
+| `odoo18-smtp-password` | optional SMTP login password | rendered into the private Odoo config only when an SMTP user is configured |
 
 Rotate them with `scripts/rotate-secrets.sh --db` and/or `--admin`. `--db` changes the role password
 in PostgreSQL, replaces the secret, re-renders the conf and restarts Odoo, all without putting a
@@ -148,19 +208,23 @@ default master password `admin` is rejected.
 
 ```bash
 git pull
-scripts/upgrade.sh                     # add --update-modules to run `odoo -u all` per database
+scripts/upgrade.sh                     # generic profile: add --update-modules for `odoo -u all`
 ```
 
 It backs up, saves the installed units, runs `install.sh` (which pulls the new pinned images first),
 brings pgvector forward in every database (`ALTER EXTENSION vector UPDATE`) and runs the smoke test.
 If anything fails, the previous units come back and Odoo restarts on the previous images. A database
 that a newer Odoo has already migrated is not rolled back: restore the pre-upgrade archive.
+Tenant cloud always checks the image digest and core date before serving. A new digest must pass
+installed-addon source checks, a bounded `-u all`, and post-upgrade module verification; the
+same digest is skipped. Three failed attempts or a core downgrade are blocked. Use
+`scripts/upgrade.sh` for tenant image changes so the gate has a pre-upgrade backup.
 
 ## Backup and restore
 
 ```bash
 scripts/backup.sh                      # stops Odoo, dumps every database, copies the filestore, validates
-scripts/backup.sh --include-secrets    # also stores both passwords in the archive (keep it private)
+scripts/backup.sh --include-secrets    # also stores database, master and available first administrator passwords
 scripts/restore.sh --archive ~/.local/share/woow-backups/odoo18/odoo18-<stamp>.tar --confirm-restore odoo18
 ```
 
@@ -169,10 +233,41 @@ An archive holds `roles.sql`, one custom-format dump per Odoo database, the whol
 before it is published and again before it is restored (`scripts/validate-backup.py`; no symlinks, no
 path traversal, checksums, real PostgreSQL dumps).
 
-Restore drops and recreates the databases that are in the archive, swaps their filestores, sets the
+Generic-profile restore drops and recreates the databases that are in the archive, swaps their filestores, sets the
 database role back to this host's password, and verifies. A failure after the first change restores
 the pre-restore archive it took at the start, and leaves Odoo stopped if even that fails, so it can
 never serve mixed state. Databases that are not in the archive are left alone and reported.
+
+Tenant cloud uses staged restore. `restore.sh` stages and switches in one call, retaining the
+previous database and filestore for rollback. To review the stage before switching:
+
+```bash
+scripts/restore-online.sh --stage --archive <backup.tar> --request <id>
+scripts/restore-online.sh --switch --request <id> --confirm-restore odoo18
+scripts/restore-online.sh --rollback --request <id> --confirm-restore odoo18
+scripts/restore-online.sh --discard --request <id> --confirm-restore odoo18
+```
+
+The stage verifies the backup, image, module versions, attachment references and database
+identity while the live web serves. Stages expire after 24 hours. Switching stops the web and
+gateway briefly, renames the databases in one transaction, swaps filestores, then checks health;
+failure attempts an automatic rollback. A successful switch retains old data for 24 hours;
+`--finalize --request <id> --confirm-restore odoo18` removes it after that period. Tenant
+restore keeps this host's existing credentials; `--restore-secrets` is for the generic cold path.
+
+For an optional daily backup timer (02:00 Asia/Taipei plus up to three hours of jitter):
+
+```bash
+scripts/backup-schedule.sh enable   # requires a healthy Odoo database
+scripts/backup-schedule.sh status
+scripts/backup-schedule.sh disable  # keeps existing archives
+```
+
+The timer calls `backup.sh --automated` without passwords and checks the archive before publishing it.
+Only its `odoo18-auto-*.tar` archives are pruned: the newest seven, plus the first successful backup
+from each of the most recent four ISO weeks, are retained. A missing or incorrect checksum stops all
+pruning. Manual, upgrade and pre-restore backups are never subject to this retention rule. Keep this
+repository checkout at the same path while the timer is enabled. `uninstall.sh` disables the timer.
 
 ## Uninstall
 
@@ -182,8 +277,9 @@ scripts/uninstall.sh --purge --confirm-purge odoo18      # also delete both volu
                                                          # the secrets and ~/.config/odoo18
 ```
 
-`--purge` is the only command that deletes data, and it takes a final cold backup of both volumes plus
-the env file first. Images, backups and your addons directory are never deleted.
+`--purge` is the only command that deletes service data, and it takes a final cold backup of both
+volumes plus the env file first. Images, manual backups and your addons directory are never deleted;
+the optional timer rotates only its own automated archives.
 
 ## Migrating an existing compose deployment
 

@@ -1,0 +1,7 @@
+# Build with the pinned public WOOWTECH/odoo-addons checkout as context.
+# The base may be a private PaaS cloud image already authorized on this host.
+ARG ODOO_BASE_IMAGE
+FROM ${ODOO_BASE_IMAGE}
+USER root
+COPY --chown=100:101 addons/ /opt/woow/ha-addons/
+USER odoo

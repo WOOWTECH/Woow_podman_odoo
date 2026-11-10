@@ -28,15 +28,22 @@ def identifiers(source: str) -> dict[str, str]:
 
 
 def convert(source: str, drop_roles_from: str | None = None) -> str:
+    # pg_dumpall now wraps the roles dump in psql's \restrict mode. A previous
+    # SELECT ... \gexec rewrite cannot run there; keep the restriction and use
+    # SQL alone. Pick a dollar-quote tag absent from the input so even an odd
+    # quoted role identifier cannot terminate the DO body.
+    i = 0
+    while f"$woow_role_{i}$" in source:
+        i += 1
+    tag = f"$woow_role_{i}$"
+
     def conditional(match: re.Match) -> str:
         identifier = match.group("identifier")
-        name = role_name(identifier).replace("'", "''")
-        # Both SQL string literals must escape apostrophes. In particular, a
-        # quoted PostgreSQL identifier may itself contain an apostrophe.
-        create_sql = f"CREATE ROLE {identifier}".replace("'", "''")
+        name = "'" + role_name(identifier).replace("'", "''") + "'"
         return (
-            f"SELECT '{create_sql}' WHERE NOT EXISTS "
-            f"(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '{name}') \\gexec"
+            f"DO {tag} BEGIN IF NOT EXISTS "
+            f"(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = {name}) THEN "
+            f"EXECUTE format('CREATE ROLE %I', {name}); END IF; END {tag};"
         )
 
     output = CREATE_ROLE.sub(conditional, source)

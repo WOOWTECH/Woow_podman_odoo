@@ -74,6 +74,50 @@ if [[ $code == 200 ]]; then pass "A4 /web/health returns 200"; else fail "A4 /we
 code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$url/" || true)
 if [[ $code =~ ^(200|30[1237])$ ]]; then pass "A4 / returns $code"; else fail "A4 / returned $code"; fi
 
+if [[ $(ql_env_get WOOW_ODOO_GATEWAY_ENABLED False) == True ]]; then
+  gateway_host=$(app_local_host "$(ql_env_get WOOW_ODOO_GATEWAY_BIND 127.0.0.1)")
+  gateway_port=$(ql_env_get WOOW_ODOO_GATEWAY_PORT 18080)
+  gateway_url=http://$gateway_host:$gateway_port
+  if systemctl --user is-active --quiet odoo-gateway.service; then pass 'G1 gateway unit is active'; else fail 'G1 gateway unit is inactive'; fi
+  if ql_wait_container_healthy odoo18-gateway 120 2>/dev/null; then pass 'G1 gateway container is healthy'; else fail 'G1 gateway container is unhealthy'; fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$gateway_url/web/health" || true)
+  if [[ $code == 200 ]]; then pass 'G2 gateway proxies Odoo health'; else fail "G2 Odoo gateway health returned $code"; fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$gateway_url/web/database/manager" || true)
+  if [[ $code == 404 ]]; then pass 'G2 gateway denies database management'; else fail "G2 database manager returned $code"; fi
+  headers=$(curl -sSI -m 10 -H 'X-Forwarded-Proto: https' "$gateway_url/nginx-health" || true)
+  if grep -qi '^Strict-Transport-Security: max-age=15552000' <<<"$headers"; then pass 'G3 HTTPS gateway response has HSTS'; else fail 'G3 HSTS missing'; fi
+  http_headers=$(curl -sS -D - -o /dev/null -m 10 "$gateway_url/" || true)
+  https_headers=$(curl -sS -D - -o /dev/null -m 10 -H 'X-Forwarded-Proto: https' "$gateway_url/" || true)
+  if grep -qi '^Set-Cookie:.*session_id=.*SameSite=Lax' <<<"$http_headers" &&
+     ! grep -qi '^Set-Cookie:.*session_id=.*Secure' <<<"$http_headers"; then
+    pass 'G3 HTTP session cookie is usable on loopback'
+  else
+    fail 'G3 HTTP session cookie has wrong security flags'
+  fi
+  if grep -qi '^Set-Cookie:.*session_id=.*SameSite=Lax' <<<"$https_headers" &&
+     grep -qi '^Set-Cookie:.*session_id=.*Secure' <<<"$https_headers"; then
+    pass 'G3 HTTPS session cookie is Secure'
+  else
+    fail 'G3 HTTPS session cookie has wrong security flags'
+  fi
+  marker=woow_gateway_token_$$_$RANDOM
+  curl -s -o /dev/null -m 10 "$gateway_url/web/reset_password?token=$marker" || true
+  sleep 1
+  if podman logs --tail 100 odoo18-gateway 2>&1 | grep -qF "$marker"; then fail 'G3 gateway log contains a query token'; else pass 'G3 gateway log omits query tokens'; fi
+  if [[ $(ql_env_get WOOW_ODOO_WORKERS 0) != 0 ]]; then
+    marker=woow_ws_token_$$_$RANDOM
+    curl -s -o /dev/null -m 10 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+      -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+      "$gateway_url/websocket?token=$marker" || true
+    sleep 1
+    if podman logs --tail 100 odoo18-web 2>&1 | grep -qF "$marker"; then
+      fail 'G3 Odoo longpolling log contains a query token'
+    else
+      pass 'G3 Odoo longpolling log omits query tokens'
+    fi
+  fi
+fi
+
 if ((quick)); then
   printf '%s passed, %s failed, %s warnings (quick)\n' "$npass" "$nfail" "$nwarn"
   ((nfail == 0))
@@ -82,11 +126,16 @@ fi
 
 db_pw=$(app_secret_read odoo18-postgres-password || true)
 admin_pw=$(app_secret_read odoo18-admin-password || true)
+super_pw=''
+if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+  super_pw=$(app_secret_read odoo18-postgres-super-password || true)
+  [[ -n $super_pw ]] || fail 'T0 PostgreSQL superuser secret is missing'
+fi
 [[ -n $db_pw && -n $admin_pw ]] || fail "A5 secrets odoo18-postgres-password / odoo18-admin-password are missing"
 
 # A5 secret hygiene: inspect, process arguments, journal, container logs, tracked files
 leaks=()
-contains() { [[ -n $db_pw && $1 == *"$db_pw"* ]] || [[ -n $admin_pw && $1 == *"$admin_pw"* ]]; }
+contains() { [[ -n $db_pw && $1 == *"$db_pw"* ]] || [[ -n $admin_pw && $1 == *"$admin_pw"* ]] || [[ -n $super_pw && $1 == *"$super_pw"* ]]; }
 contains "$(podman inspect odoo18-db odoo18-web 2>/dev/null || true)" && leaks+=("podman inspect")
 contains "$(podman top odoo18-db args 2>/dev/null; podman top odoo18-web args 2>/dev/null)" && leaks+=("process arguments")
 contains "$(journalctl --user -u odoo.service -u odoo-db.service -o cat --no-pager 2>/dev/null || true)" && leaks+=("journal")
@@ -125,21 +174,52 @@ elif [[ -n $admin_pw ]]; then
   out=$(rpc admin)
   if [[ $out == *AccessDenied* || $out == *'Access Denied'* ]]; then pass "A7 master password 'admin' is rejected"; else fail "A7 master password 'admin' was not rejected"; fi
 fi
-unset db_pw admin_pw
+unset db_pw admin_pw super_pw
 
-# A8 pgvector is available at the pinned version (throwaway database, dropped again)
-want_vec=${DB_IMAGE#*pgvector:}
-want_vec=${want_vec%%-*}
+# A8 pgvector is available at the version shipped by the running database image.
+db_actor=odoo
+[[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) != True ]] || db_actor=postgres
+want_vec=$(podman exec odoo18-db psql -X -U "$db_actor" -d postgres -Atqc \
+  "SELECT default_version FROM pg_available_extensions WHERE name='vector'" 2>/dev/null || true)
+[[ -n $want_vec ]] || fail 'A8 running PostgreSQL image has no pgvector extension'
 probe_db=woow_smoke_vector_$$
-if podman exec odoo18-db createdb -U odoo "$probe_db" >/dev/null 2>&1 \
-  && got=$(podman exec odoo18-db psql -X -U odoo -d "$probe_db" -v ON_ERROR_STOP=1 -Atqc \
+if podman exec odoo18-db createdb -U "$db_actor" "$probe_db" >/dev/null 2>&1 \
+  && got=$(podman exec odoo18-db psql -X -U "$db_actor" -d "$probe_db" -v ON_ERROR_STOP=1 -Atqc \
     "CREATE EXTENSION vector; SELECT extversion FROM pg_extension WHERE extname = 'vector'" 2>/dev/null) \
-  && [[ $got == "$want_vec" ]]; then
+  && [[ -n $want_vec && $got == "$want_vec" ]]; then
   pass "A8 pgvector $want_vec works"
 else
   fail "A8 pgvector: expected $want_vec, got '${got:-error}'"
 fi
-podman exec odoo18-db dropdb -U odoo --if-exists "$probe_db" >/dev/null 2>&1 && probe_db=''
+podman exec odoo18-db dropdb -U "$db_actor" --if-exists "$probe_db" >/dev/null 2>&1 && probe_db=''
+
+if [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) == True ]]; then
+  flags=$(podman exec odoo18-db psql -X -U postgres -d postgres -Atqc \
+    "SELECT rolsuper || ',' || rolcreatedb || ',' || rolcreaterole FROM pg_roles WHERE rolname='odoo'" 2>/dev/null || true)
+  if [[ $flags == false,false,false ]]; then pass 'T0 Odoo database role has no superuser/create privileges'; else fail "T0 Odoo role flags: ${flags:-missing}"; fi
+  denied_db="woow_denied_$$_$RANDOM"
+  if podman exec odoo18-db createdb -U odoo "$denied_db" >/dev/null 2>&1; then
+    fail 'T0 Odoo role can create a database'
+    podman exec odoo18-db dropdb -U postgres --if-exists "$denied_db" >/dev/null 2>&1 || true
+  else
+    pass 'T0 Odoo role cannot create a database'
+  fi
+  tenant_db=$(ql_env_get WOOW_ODOO_DEFAULT_DB)
+  collate=$(podman exec odoo18-db psql -X -U odoo -d postgres -Atqc \
+    "SELECT datcollate FROM pg_database WHERE datname = '$tenant_db'" 2>/dev/null || true)
+  extensions=$(podman exec odoo18-db psql -X -U odoo -d "$tenant_db" -Atqc \
+    "SELECT string_agg(extname, ',' ORDER BY extname) FROM pg_extension WHERE extname IN ('pg_trgm','vector')" 2>/dev/null || true)
+  if [[ $collate == C && $extensions == pg_trgm,vector ]]; then
+    pass 'T1 tenant database uses C collation and pg_trgm/vector'
+  else
+    fail "T1 tenant database mismatch (collation=${collate:-?}, extensions=${extensions:-?})"
+  fi
+  if [[ $(ql_env_get WOOW_ODOO_LIST_DB) == False && $(ql_env_get WOOW_ODOO_DB_FILTER) == '^odoo$' ]]; then
+    pass 'T1 tenant database manager is disabled and dbfilter is pinned'
+  else
+    fail 'T1 tenant database manager/filter are not locked down'
+  fi
+fi
 
 # A9 addons are mounted read-only and the host directory keeps its owner
 rw=$(podman inspect --format '{{range .Mounts}}{{if eq .Destination "/mnt/extra-addons"}}{{.RW}}{{end}}{{end}}' odoo18-web 2>/dev/null || true)

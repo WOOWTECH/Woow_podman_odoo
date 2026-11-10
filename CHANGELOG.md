@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Reconcile missing Podman network and volumes when their generated systemd oneshot units still
+  report active after a Podman reset. The installer now recovers those resources before starting Odoo.
+- Accept an optional digest-pinned Odoo image for curated HA/PaaS module builds; include its
+  `/opt/woow/addons` path alongside the read-only host addons, and record the deployed image in
+  backup metadata.
+- Suppress werkzeug INFO request lines, which can contain password-reset URL tokens.
+- Add a local XML-RPC database initializer with a generated first-admin password in a Podman secret.
+- Optionally bootstrap a named database during installation; repeat installs verify its base/web
+  state and never re-initialize it.
+- Replay roles dumps with SQL rather than `\gexec`, so PostgreSQL's restricted dump mode permits
+  restores. A real partner and filestore attachment survived a backup, mutation and restore test.
+
 ## 2.0.0 — 2026-09-12 (BREAKING)
 
 Quadlet + systemd is now the only deployment in this repo, built on the hardened variant that ran on

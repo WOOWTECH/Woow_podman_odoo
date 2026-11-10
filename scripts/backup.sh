@@ -3,7 +3,7 @@
 # hardened compose variant; the compose calls became systemd unit calls, and it now dumps every Odoo
 # database instead of only the "postgres" maintenance database.
 #
-#   scripts/backup.sh [--include-secrets]
+#   scripts/backup.sh [--include-secrets | --automated]
 #
 #   --include-secrets  also store the database and master passwords in the archive (0600 inside a
 #                      0700 directory). Needed to restore onto a host that has no secrets yet.
@@ -23,29 +23,53 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=odoo-helpers.sh
 . "$REPO/scripts/odoo-helpers.sh"
 
-include_secrets=0
+include_secrets=0 automated=0
 while (($#)); do
   case $1 in
     --include-secrets) include_secrets=1 ;;
+    --automated) automated=1 ;;
     -h | --help) sed -n '2,14p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift
 done
+((include_secrets == 0 || automated == 0)) || ql_die "--automated cannot include secrets"
 ql_require_rootless
 ql_lock "$APP"
-[[ $(podman inspect --format '{{.State.Health.Status}}' odoo18-db 2>/dev/null) == healthy ]] \
-  || ql_die "odoo18-db is not healthy; refusing to back up"
+app_env_load
+tenant_cloud=$(ql_env_get WOOW_ODOO_TENANT_CLOUD False)
+role_model=legacy-superuser
+if [[ $tenant_cloud == True && $(podman exec odoo18-db psql -X -U postgres -d postgres -Atqc \
+  "SELECT rolsuper FROM pg_roles WHERE rolname='odoo'" 2>/dev/null) == f ]]; then
+  role_model=tenant-restricted
+fi
+ql_wait_container_healthy odoo18-db 120 \
+  || ql_die "odoo18-db did not become healthy within 120 seconds; refusing to back up"
 web_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-web 2>/dev/null || echo false)
+gateway_was_running=$(podman inspect --format '{{.State.Running}}' odoo18-gateway 2>/dev/null || echo false)
+actual_odoo_image=$(podman inspect --format '{{.ImageName}}' odoo18-web 2>/dev/null || true)
+actual_db_image=$(podman inspect --format '{{.ImageName}}' odoo18-db 2>/dev/null || true)
+if [[ $actual_odoo_image != *@sha256:* ]]; then
+  actual_odoo_image=$(sed -n 's/^Image=//p' "$HOME/.config/containers/systemd/odoo.container" 2>/dev/null || true)
+fi
+[[ $actual_odoo_image == *@sha256:* ]] || ql_die "cannot read the deployed Odoo image for backup metadata"
+if [[ $actual_db_image != *@sha256:* ]]; then
+  actual_db_image=$(sed -n 's/^Image=//p' "$HOME/.config/containers/systemd/odoo-db.container" 2>/dev/null || true)
+fi
+[[ $actual_db_image == *@sha256:* ]] || ql_die "cannot read the deployed database image for backup metadata"
 (umask 077 && mkdir -p -- "$BACKUP_ROOT") || ql_die "cannot create $BACKUP_ROOT"
 chmod 700 "$BACKUP_ROOT"
 staging=$(mktemp -d "$BACKUP_ROOT/.backup.XXXXXX")
 web_restored=0
+gateway_restored=0
 cleanup() {
   local status=$?
   podman unshare rm -rf -- "$staging" >/dev/null 2>&1 || true
   if [[ $web_was_running == true && $web_restored == 0 ]]; then
     systemctl --user start odoo.service >/dev/null 2>&1 || ql_warn "could not start odoo.service again"
+  fi
+  if [[ $gateway_was_running == true && $gateway_restored == 0 ]]; then
+    systemctl --user start odoo-gateway.service >/dev/null 2>&1 || ql_warn "could not start odoo-gateway.service again"
   fi
   return "$status"
 }
@@ -60,7 +84,12 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 root=$staging/odoo18-backup-$stamp
 mkdir -p "$root/databases" "$root/volume"
 
-podman exec odoo18-db pg_dumpall -U odoo --roles-only >"$root/roles.sql"
+if [[ $role_model == tenant-restricted ]]; then
+  # The tenant archive never transports superuser or role passwords. The installer owns roles.
+  printf '%s\n' '-- Tenant roles are managed by scripts/install.sh; no role SQL is restored.' >"$root/roles.sql"
+else
+  podman exec odoo18-db pg_dumpall -U odoo --roles-only >"$root/roles.sql"
+fi
 [[ -s $root/roles.sql ]] || ql_die "pg_dumpall --roles-only produced nothing"
 dbs_raw=$(odoo_databases) || ql_die "cannot list the databases"
 mapfile -t dbs < <(printf '%s' "$dbs_raw" | grep -v '^[[:space:]]*$' || true)
@@ -69,8 +98,18 @@ if ((${#dbs[@]} == 0)); then
 fi
 for db in "${dbs[@]}"; do
   [[ $db =~ ^[A-Za-z0-9_.-]+$ ]] || ql_die "refusing to back up a database with an unusual name: $db"
-  # --file=- would be a literal file named "-" in this image, so the dump is streamed on stdout.
-  podman exec odoo18-db pg_dump -U odoo --format=custom "$db" >"$root/databases/$db.dump"
+  # Keep the complete archive inside the container until pg_dump exits. On some Podman 4.9
+  # hosts a large `podman exec` stdout stream can end before its final bytes are copied.
+  tmp_dump=/tmp/odoo18-backup-$$-$db.dump
+  if ! podman exec odoo18-db pg_dump -U odoo --format=custom --file="$tmp_dump" "$db"; then
+    podman exec odoo18-db rm -f -- "$tmp_dump" >/dev/null 2>&1 || true
+    ql_die "could not dump database $db"
+  fi
+  if ! podman cp "odoo18-db:$tmp_dump" "$root/databases/$db.dump"; then
+    podman exec odoo18-db rm -f -- "$tmp_dump" >/dev/null 2>&1 || true
+    ql_die "could not copy the complete dump of $db"
+  fi
+  podman exec odoo18-db rm -f -- "$tmp_dump"
   [[ $(head -c 5 "$root/databases/$db.dump") == PGDMP ]] || ql_die "the dump of $db is not in PostgreSQL custom format"
   ql_info "dumped database $db ($(du -h "$root/databases/$db.dump" | cut -f1))"
 done
@@ -84,7 +123,20 @@ if ((include_secrets)); then
   for s in odoo18-postgres-password odoo18-admin-password; do
     (umask 077 && app_secret_read "$s" >"$root/secrets/${s#odoo18-}") || ql_die "cannot read secret $s"
   done
-  ql_warn "the archive contains both passwords (--include-secrets): keep it as private as a password"
+  if [[ $role_model == tenant-restricted ]]; then
+    (umask 077 && app_secret_read odoo18-postgres-super-password >"$root/secrets/postgres-super-password") \
+      || ql_die 'cannot read PostgreSQL superuser secret'
+  fi
+  for db in "${dbs[@]}"; do
+    secret="odoo18-$db-admin-password"
+    if podman secret exists "$secret"; then
+      [[ -d $root/secrets/db-admin ]] || mkdir -m 700 "$root/secrets/db-admin"
+      (umask 077 && app_secret_read "$secret" >"$root/secrets/db-admin/$db") \
+        || ql_die "cannot read first administrator secret for $db"
+      [[ -s $root/secrets/db-admin/$db ]] || ql_die "first administrator secret for $db is empty"
+    fi
+  done
+  ql_warn "the archive contains database, master and available first administrator passwords; keep it private"
 fi
 
 dblist=''
@@ -92,15 +144,18 @@ for db in "${dbs[@]}"; do dblist+="\"$db\","; done
 dblist=${dblist%,}
 secrets_json=false
 ((include_secrets == 0)) || secrets_json=true
-printf '{"project":"odoo18","created_utc":"%s","databases":[%s],"images":{"odoo":"%s","database":"%s"},"secrets_included":%s}\n' \
-  "$stamp" "$dblist" "$ODOO_IMAGE" "$DB_IMAGE" "$secrets_json" >"$root/metadata.json"
+printf '{"project":"odoo18","created_utc":"%s","databases":[%s],"images":{"odoo":"%s","database":"%s"},"secrets_included":%s,"role_model":"%s"}\n' \
+  "$stamp" "$dblist" "$actual_odoo_image" "$actual_db_image" "$secrets_json" \
+  "$role_model" >"$root/metadata.json"
 
 podman unshare bash -c 'cd "$1"; find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | while IFS= read -r -d "" f; do sha256sum "${f#./}"; done >SHA256SUMS' sh "$root"
 podman unshare find "$root" -type d -exec chmod 700 {} +
 podman unshare find "$root" -type f -exec chmod 600 {} +
 
-archive=$BACKUP_ROOT/odoo18-$stamp.tar
-[[ ! -e $archive ]] || archive=$BACKUP_ROOT/odoo18-$stamp-$$.tar
+prefix=odoo18
+((automated == 0)) || prefix=odoo18-auto
+archive=$BACKUP_ROOT/$prefix-$stamp.tar
+[[ ! -e $archive ]] || archive=$BACKUP_ROOT/$prefix-$stamp-$$.tar
 tmp=$staging/publish.tar
 podman unshare tar -C "$staging" -cf "$tmp" "odoo18-backup-$stamp"
 podman unshare chown 0:0 "$tmp"
@@ -116,5 +171,15 @@ if [[ $web_was_running == true ]]; then
   web_restored=1
   app_wait_healthy odoo18-web 300 odoo.service
 fi
+if [[ $gateway_was_running == true ]]; then
+  systemctl --user start odoo-gateway.service
+  gateway_restored=1
+  app_wait_healthy odoo18-gateway 180 odoo-gateway.service
+fi
 ql_info "backup complete: $archive ($(du -h "$archive" | cut -f1))"
+if ((automated)); then
+  # Only archives made by the timer can be pruned. Human, pre-upgrade and pre-restore
+  # backups retain their own lifecycle. Prune only after the new archive validated.
+  python3 "$REPO/scripts/retain-backups.py" --directory "$BACKUP_ROOT" >&2
+fi
 printf '%s\n' "$archive"

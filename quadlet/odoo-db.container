@@ -6,22 +6,23 @@
 # The unit is odoo-db.service, deliberately not odoo18-*: a hand-written unit of the same name in
 # ~/.config/systemd/user would silently shadow the Quadlet-generated one.
 [Unit]
-Description=Woow Odoo 18 database (PostgreSQL 16 + pgvector)
+Description=Woow Odoo 18 database (PostgreSQL + pgvector)
 Documentation=https://github.com/WOOWTECH/Woow_podman_odoo
 
 [Container]
 ContainerName=odoo18-db
-Image=docker.io/pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9
+Image=@@DB_IMAGE@@
 Network=odoo.network
 HostName=odoo18-db
 Label=io.woowtech.stack=odoo18
 Volume=odoo-db-data.volume:/var/lib/postgresql/data
-Environment=POSTGRES_USER=odoo
+Environment=POSTGRES_USER=@@DB_BOOTSTRAP_USER@@
 Environment=POSTGRES_DB=postgres
+Environment=POSTGRES_INITDB_ARGS=--data-checksums
 # Read only when an empty volume is initialised; the password never enters the container config.
 Environment=POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
-Secret=odoo18-postgres-password,type=mount,target=postgres_password,uid=999,gid=999,mode=0400
-HealthCmd=pg_isready -U odoo -d postgres
+Secret=@@DB_BOOTSTRAP_SECRET@@,type=mount,target=postgres_password,uid=999,gid=999,mode=0400
+HealthCmd=pg_isready -U @@DB_BOOTSTRAP_USER@@ -d postgres
 HealthInterval=10s
 HealthTimeout=5s
 HealthRetries=12

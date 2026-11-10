@@ -65,6 +65,10 @@ scripts/install.sh                # 產生單元、驗證、拉映像、檢查�
 podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-password
 ```
 
+若要產生隨機的首位管理員密碼並保存在另一個 Podman secret，可在 Odoo 健康後執行
+`scripts/init-db.py --database my_odoo --admin-login me@example.com --lang zh_TW`。腳本拒絕重新初始化既有資料庫，
+成功時會印出在私人終端讀取登入密碼的指令。
+
 常用選項：
 
 | 選項 | 作用 |
@@ -83,11 +87,40 @@ podman secret inspect --showsecret --format '{{.SecretData}}' odoo18-admin-passw
 |---|---|---|
 | `WOOW_ODOO_BIND` | `127.0.0.1` | Odoo 發布的位址：`127.0.0.1`、本機某個 IPv4 位址，或 `all`。 |
 | `WOOW_ODOO_PORT` | `18069` | Odoo 的主機埠。 |
+| `WOOW_ODOO_IMAGE` | 空值（預設釘版官方映像） | 可選用附 `@sha256:` digest 的預建 Odoo 映像，供已驗證的 PaaS 模組組合使用；映像須以 uid 100、gid 101 執行 Odoo。私有 registry 先用 Podman 登入，憑證不要寫入此檔。 |
+| `WOOW_ODOO_DB_IMAGE` | 空值（釘版 PG16 映像） | 全新實例可選釘版資料庫映像；既有資料卷的 `PG_VERSION` 與映像主版本不同時安裝器會拒絕。 |
+| `WOOW_ODOO_GATEWAY_ENABLED` | `False` | 可選 nginx 入口；啟用時 Odoo 必須綁 `127.0.0.1`，入口封鎖 `/web/database/*` 並略去 access log 的查詢字串。 |
+| `WOOW_ODOO_GATEWAY_BIND`、`WOOW_ODOO_GATEWAY_PORT` | `127.0.0.1`、`18080` | 可選入口位址與埠；對外服務時先接 TLS 終止層。 |
+| `WOOW_ODOO_WORKERS`、`WOOW_ODOO_MAX_CRON_THREADS` | `0`、`1` | 網頁 worker 及排程執行緒；worker > 0 時入口將 WebSocket 轉到 8072。 |
+| `WOOW_ODOO_DB_MAXCONN`、`WOOW_ODOO_LIMIT_TIME_*`、`WOOW_ODOO_LIMIT_REQUEST` | 一般預設見設定範例 | 資料庫連線池與請求／排程時間上限；釘版租戶配置帶 PaaS tenant 值。 |
+| `WOOW_ODOO_DB_FILTER` | 空值 | 首次建庫後可設單一資料庫篩選，例如 `^odoo$`。 |
+| `WOOW_ODOO_EMAIL_FROM`、`WOOW_ODOO_SMTP_*` | 空值／埠 `587`／TLS `True` | 可選寄信設定；登入密碼放 Podman secret `odoo18-smtp-password`，不可寫入此設定檔。 |
 | `WOOW_ODOO_ADDONS_DIR` | `%h/.local/share/odoo18/addons` | 以唯讀掛載到 `/mnt/extra-addons` 的主機目錄；`%h` 是你的家目錄。 |
 | `WOOW_ODOO_LIST_DB` | `True` | 資料庫建立完成後可設為 `False` 隱藏資料庫管理介面。 |
+| `WOOW_ODOO_DEFAULT_DB` | 空值 | 可選首次自動建立的資料庫名稱；需與 `WOOW_ODOO_ADMIN_LOGIN` 一起設定。 |
+| `WOOW_ODOO_ADMIN_LOGIN` | 空值 | 首位管理員登入名，隨機密碼存入 Podman secret。 |
+| `WOOW_ODOO_LANG` | `zh_TW` | 首次建庫語言。 |
 
 其他設定（workers、記憶體上限、`proxy_mode` 等）在 `config/odoo.conf.template`。編輯樣板後執行
 `scripts/install.sh`，conf secret 會重新算出並重啟 Odoo。
+模組路徑同時包含映像內的 `/opt/woow/addons`、`/opt/woow/ha-addons` 與主機唯讀掛載的 `/mnt/extra-addons`；預設官方映像沒有前兩者。
+首次自動建庫只接受 `WOOW_ODOO_BIND=127.0.0.1`、`WOOW_ODOO_LIST_DB=True`。安裝器會保留已完成初始化的資料庫，
+遇到不完整的資料庫則停止，避免重跑 `-i base` 覆蓋既有管理員資料；建庫後可把 `WOOW_ODOO_LIST_DB` 改為 `False`。
+PaaS cloud 映像應從有權限的 `paas-odoo-ci` 原始碼及 `Dockerfile.cloud` 建置，透過
+`podman image inspect IMAGE --format '{{index .RepoDigests 0}}'` 取 digest 後填入 `WOOW_ODOO_IMAGE`。
+若主機已有資料，先改這個設定再執行 `scripts/upgrade.sh --update-modules`，讓升級先做冷備份與單元快照。
+
+### 全新 HA 與 PaaS cloud 模組組合
+
+[功能對照紀錄](docs/HA_PAAS_PARITY_2026-11-10.md) 說明全新實例的實測與尚未對齊之處。PaaS 租戶範本釘住 chart `0.2.26`、cloud 映像 `20261101.1152`、PG17.11；取得 JCR 授權後，在全新空資料卷使用[釘版配置](config/profiles/tenant-cloud.profile)。先填 `WOOW_ODOO_DEFAULT_DB=odoo` 與實際的 `WOOW_ODOO_ADMIN_LOGIN`。tenant 模式以 `postgres` 初始化獨立資料卷，建立受限 `odoo` 角色與 C 排序規則資料庫，僅在全新庫跑一次 `-i base`，並於 web 啟動前設定管理員 secret；之後固定 `db_name=odoo`、`list_db=False`、`dbfilter=^odoo$`。釘版 cloud 映像有 7 顆租戶模組；另有來自較新 CI main、含 13 顆模組的舊候選映像，兩者不可混同。若要再加入公開 HA 的 7 顆範例模組，以有權限的 cloud 映像為底層執行：
+
+```bash
+scripts/build-ha-cloud-image.sh <帶-digest-的-cloud-映像> <固定-51856b0-且乾淨的-odoo-addons-checkout> localhost/woow-odoo-ha-cloud:local
+```
+
+把腳本輸出的本機 digest 設為 `WOOW_ODOO_IMAGE` 後，以 `scripts/install.sh` 建立新庫。可設定 `WOOW_ODOO_GATEWAY_ENABLED=True`；Odoo 本體仍應綁回圈位址，入口預設為 `127.0.0.1:18080`。這組映像**未包含** PaaS platform 的約 40 顆模組與外部 `woow_paas_platform`；私有 PaaS 原始碼與憑證不會進入公開倉庫。
+
+若既有 tenant 資料卷以 `odoo` 作為 PostgreSQL 初始超級使用者（OID 10），無法直接降權。執行 `scripts/migrate-tenant-db-role.sh`：腳本先備份，再於新卷還原、核對權限與資料後切換，並保留舊卷供回退。此流程已在 rootless Podman 主機實測。
 
 ### Addons 與 rootless 權限
 
@@ -113,9 +146,12 @@ podman exec odoo18-web odoo -c /etc/odoo/odoo.conf -d <資料庫> -u <模組> --
 
 | Podman secret | 內容 | 如何傳入容器 |
 |---|---|---|
-| `odoo18-postgres-password` | 資料庫角色 `odoo` 的密碼 | 掛載於 `/run/secrets/postgres_password`；初始化資料卷時 PostgreSQL 透過 `POSTGRES_PASSWORD_FILE` 讀取 |
+| `odoo18-postgres-password` | 資料庫角色 `odoo` 的密碼 | 算進 Odoo 設定；一般模式也用於 PostgreSQL 初始設定 |
+| `odoo18-postgres-super-password` | tenant 資料庫管理員密碼 | 只掛載於資料庫容器，不給 Odoo |
 | `odoo18-admin-password` | Odoo 主控（資料庫管理）密碼 | 不掛載，只算進 conf |
 | `odoo18-odoo-conf` | 算好的 `/etc/odoo/odoo.conf` | 唯讀掛載，擁有者 `odoo`、權限 0400 |
+| `odoo18-gateway-conf` | 可選 nginx 設定 | 唯讀掛載於入口容器 |
+| `odoo18-smtp-password` | 可選 SMTP 登入密碼 | 設定 SMTP 使用者時才算進 Odoo 的私有設定 |
 
 以 `scripts/rotate-secrets.sh --db` 或 `--admin` 輪替。`--db` 會修改 PostgreSQL 的角色密碼、取代 secret、
 重新算出 conf 並重啟 Odoo，全程不把密碼放進指令列。若要自訂值，請在私人終端機執行：
@@ -139,18 +175,19 @@ tests/smoke.sh --quick  # 只檢查單元、健康、埠與 HTTP
 
 ```bash
 git pull
-scripts/upgrade.sh                     # 需要時加 --update-modules，對每個資料庫執行 odoo -u all
+scripts/upgrade.sh                     # 一般模式可加 --update-modules
 ```
 
 流程為：備份 → 保存已安裝的單元 → 執行 `install.sh`（先拉新的釘版映像）→ 對每個資料庫執行
 `ALTER EXTENSION vector UPDATE` → smoke 測試。任何一步失敗就放回原本的單元，並以原本的映像重啟 Odoo。
 新版 Odoo 已遷移過的資料庫不會自動回復，請用升級前的備份還原。
+tenant 模式在 web 開放前依映像 digest 與 Odoo core 日期檢查升級；新 digest 先核對 addon 來源，執行有時間上限的 `-u all`，完整驗證模組後才寫完成標記。同 digest 跳過，失敗三次或 core 降版則拒絕。tenant 更換映像時一律用 `scripts/upgrade.sh`，先取得升級前備份。
 
 ## 備份與還原
 
 ```bash
 scripts/backup.sh                      # 停止 Odoo、逐一 dump 每個資料庫、複製 filestore、驗證
-scripts/backup.sh --include-secrets    # 另外把兩組密碼放進封存檔（請當成密碼保管）
+scripts/backup.sh --include-secrets    # 另存資料庫、主控與現有首位管理員密碼（請當成密碼保管）
 scripts/restore.sh --archive ~/.local/share/woow-backups/odoo18/odoo18-<stamp>.tar --confirm-restore odoo18
 ```
 
@@ -158,9 +195,33 @@ scripts/restore.sh --archive ~/.local/share/woow-backups/odoo18/odoo18-<stamp>.t
 含映像 digest 的 `metadata.json`，以及 `SHA256SUMS`。封存前與還原前都會驗證
 （`scripts/validate-backup.py`：不得有符號連結、不得路徑穿越、檢查校驗碼與 PostgreSQL dump 格式）。
 
-還原會刪除並重建封存檔中的資料庫、換掉其 filestore、把資料庫角色密碼設回本機目前的 secret，並進行驗證。
+一般模式的還原會刪除並重建封存檔中的資料庫、換掉其 filestore、把資料庫角色密碼設回本機目前的 secret，並進行驗證。
 若在第一次變更之後失敗，會自動還原它在開始時建立的「還原前封存檔」；若連回復都失敗，Odoo 會保持停止，
 以免提供混合狀態。不在封存檔中的資料庫不會被動到，並會列出提醒。
+
+tenant 模式使用線上預備還原。`restore.sh` 會連續預備與切換；需要先驗收再切換時使用：
+
+```bash
+scripts/restore-online.sh --stage --archive <備份.tar> --request <代號>
+scripts/restore-online.sh --switch --request <代號> --confirm-restore odoo18
+scripts/restore-online.sh --rollback --request <代號> --confirm-restore odoo18
+scripts/restore-online.sh --discard --request <代號> --confirm-restore odoo18
+```
+
+預備時正式 web 繼續服務，會驗證封存、映像、模組版本、附件與資料庫身分；預備結果 24 小時後失效。切換時會短暫停止 web／gateway，在同一筆交易中改名資料庫並交換 filestore，再做健康檢查；失敗則嘗試自動回退。成功切換後舊資料保留 24 小時，可用 `--finalize --request <代號> --confirm-restore odoo18` 清除。tenant 還原沿用本機憑證，`--restore-secrets` 僅適用一般模式。
+
+可選用每日備份計時器（台北時間 02:00 起，最多延後三小時以錯開執行）：
+
+```bash
+scripts/backup-schedule.sh enable   # 須先啟動健康的 Odoo 資料庫
+scripts/backup-schedule.sh status
+scripts/backup-schedule.sh disable  # 停用但保留已建立的封存檔
+```
+
+計時器執行不含密碼的 `backup.sh --automated`，封存檔驗證後才發布。只輪替自己建立的
+`odoo18-auto-*.tar`：保留最新七份，以及最近四個 ISO 週各週首份成功備份。若校驗檔缺失或錯誤，
+會停止整批輪替。手動、升級前與還原前備份都不在輪替範圍內。啟用期間請維持本倉庫的路徑；
+`uninstall.sh` 會停用計時器。
 
 ## 解除安裝
 
@@ -170,8 +231,8 @@ scripts/uninstall.sh --purge --confirm-purge odoo18      # 另外刪除兩個 vo
                                                          # 與 ~/.config/odoo18
 ```
 
-`--purge` 是唯一會刪除資料的指令，而且會先對兩個 volume 與 env 檔做最後一次冷備份。映像、備份與你的
-addons 目錄一律不刪除。
+`--purge` 是唯一會刪除服務資料的指令，而且會先對兩個 volume 與 env 檔做最後一次冷備份。映像、
+手動備份與 addons 目錄一律不刪除；可選的計時器只輪替自己建立的自動備份。
 
 ## 從既有 compose 部署遷移
 

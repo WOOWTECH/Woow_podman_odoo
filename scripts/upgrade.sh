@@ -34,6 +34,7 @@ while (($#)); do
 done
 ql_preflight "$PODMAN_MIN"
 [[ -f $ENV_FILE ]] || ql_die "$ENV_FILE does not exist: run scripts/install.sh first"
+app_env_load
 ql_lock "$APP"
 snap=$(app_new_backup_dir upgrade)
 data=''
@@ -44,16 +45,18 @@ fi
 app_snapshot "$snap/units"
 podman inspect --format '{{.Name}} {{.ImageName}} {{.Image}}' odoo18-db odoo18-web >"$snap/images.txt" 2>/dev/null || true
 
-if "$REPO/scripts/install.sh" --no-smoke; then
+if ODOO_UPGRADE_AUTHORIZED=1 "$REPO/scripts/install.sh" --no-smoke; then
   # pgvector keeps the extension version of the database it was created in: bring each one forward.
   while IFS= read -r db; do
     [[ -n $db ]] || continue
-    if [[ $(podman exec odoo18-db psql -X -U odoo -d "$db" -Atqc "SELECT 1 FROM pg_extension WHERE extname = 'vector'" 2>/dev/null) == 1 ]]; then
-      podman exec odoo18-db psql -X -q -v ON_ERROR_STOP=1 -U odoo -d "$db" -c 'ALTER EXTENSION vector UPDATE' >/dev/null \
+    actor=odoo
+    [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) != True ]] || actor=postgres
+    if [[ $(podman exec odoo18-db psql -X -U "$actor" -d "$db" -Atqc "SELECT 1 FROM pg_extension WHERE extname = 'vector'" 2>/dev/null) == 1 ]]; then
+      podman exec odoo18-db psql -X -q -v ON_ERROR_STOP=1 -U "$actor" -d "$db" -c 'ALTER EXTENSION vector UPDATE' >/dev/null \
         && ql_info "pgvector updated in $db"
     fi
   done < <(odoo_databases || true)
-  if ((update_modules)); then
+  if ((update_modules)) && [[ $(ql_env_get WOOW_ODOO_TENANT_CLOUD False) != True ]]; then
     while IFS= read -r db; do
       [[ -n $db ]] || continue
       ql_info "updating modules in $db (this takes a while)"
@@ -72,6 +75,9 @@ fi
 ql_warn "upgrade failed; rolling back to the units saved in $snap/units"
 app_snapshot_restore "$snap/units" || ql_die "rollback failed: no usable snapshot. Inspect $snap and journalctl --user -u odoo.service"
 systemctl --user restart odoo-db.service odoo.service || true
+if [[ -f $HOME/.config/containers/systemd/odoo-gateway.container ]]; then
+  systemctl --user start odoo-gateway.service || true
+fi
 if ql_wait_container_healthy odoo18-web 300 && "$REPO/tests/smoke.sh" --quick; then
   ql_die "upgrade failed and was rolled back; the previous version is running again"
 fi

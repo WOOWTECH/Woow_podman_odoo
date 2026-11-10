@@ -4,5 +4,5 @@
 Description=Woow Odoo 18 PostgreSQL data volume
 
 [Volume]
-VolumeName=odoo18-db-data
+VolumeName=@@DB_VOLUME_NAME@@
 Label=io.woowtech.stack=odoo18
