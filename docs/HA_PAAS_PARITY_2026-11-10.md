@@ -35,7 +35,7 @@ HA 的 `woow_base_url_guard`、`woow_visitor_url` 是為 Supervisor Ingress 的 
 
 - 本機 cloud 基底映像：`jcr-prod.woowtech.io/woow-paas-docker-local/cloud-odoo:20261101.1152@sha256:5a0c0f9bed994688230b0d4869ab7f442381f2953149133842bb16065ed37316`；資料庫：`paas-postgres:17.11-20260928.1549@sha256:dbd1fed8882043f45bf759e8f7c73092505ef0afef7a23a93b177e6f7c2c840f`。兩者 JCR manifest、匯入後 RepoDigest 與 Podman 實際容器映像均已核對。
 - 以該 cloud 基底及公開 HA `odoo-addons` commit `51856b0` 建立 `localhost/woow-odoo-tenant-ha@sha256:f259166adad7e28138fb1a5fccb993cd6831b110ae316424162e5baf5227b5a1`。基底 7 顆 tenant 模組與額外 7 顆 HA 模組都可見；各安裝一顆並於還原後核對。衍生映像僅在本機，未推送到公開 registry。
-- 空的 PG17 資料卷上建立 `odoo`；管理員登入 Email 為 `woowtech@designsmart.com.tw`，隨機密碼在 `odoo18-odoo-admin-password` Podman secret。XML-RPC 與實際 HTTP 表單／session 登入通過，預設 `admin/admin` 失效。起初發現 `db_name` 過早設定會讓 Odoo 自行初始化預設管理員；已修正並重建空庫驗證。
+- 空的 PG17 資料卷上建立 `odoo`；管理員登入 Email 為 `woowtech@designsmart.com.tw`，初建時隨機密碼在 `odoo18-odoo-admin-password` Podman secret。XML-RPC 與實際 HTTP 表單／session 登入通過，預設 `admin/admin` 失效。起初發現 `db_name` 過早設定會讓 Odoo 自行初始化預設管理員；已修正並重建空庫驗證。
 - 新庫建立聯絡人及二進位附件，讀回後封存。刻意修改聯絡人並刪附件，再以 `--restore-secrets` 還原；內容、管理員登入、兩個已安裝模組、`C` collation 與 `pg_trgm`／`vector` 皆驗證。測試聯絡人與附件事後已移除；乾淨狀態的含密碼校驗封存為 `odoo18-20261110T010008Z.tar`，僅在本機私有備份目錄。
 - 新實例完成資料庫角色隔離後完整 smoke **26 通過、0 失敗、1 項因租戶關閉資料庫服務而跳過**；線上還原切換與回退各 quick smoke **16/16**，管理員 XML-RPC 登入也通過。gateway 僅綁 `127.0.0.1:18080`，Odoo 本體僅綁 `127.0.0.1:18069`，資料庫無對外 port。正式外部路由已於 2026-11-10 發布至受保護的 `https://odoo-openclaw.woowtech.io`。
 
@@ -62,5 +62,6 @@ HA 的 `woow_base_url_guard`、`woow_visitor_url` 是為 Supervisor Ingress 的 
 - `scripts/upgrade-gate.sh` 記錄映像 digest 與 Odoo deb core 日期，先核對已安裝模組來源與版本，再限制同 digest 三次嘗試，執行 `-u all`，驗證全部模組後才寫完成 marker。tenant Quadlet 的 `ExecStartPre` 每次啟動 web 都先跑此閘；實際 `systemctl --user restart odoo.service` 的 journal 顯示同 digest 跳過，入口恢復 200。隔離庫上用不同 ID、相同模組的測試映像完成一次真實更新；移走 `awesome_clicker` 的測試映像在寫 attempt 前被拒絕，人工注入的三次失敗與較新 core marker 都以 78 拒絕。正式部署仍用既定 cloud/HA digest，沒有切換到測試映像。
 - `scripts/restore-online.sh` 將本機受限角色產出的校驗備份還原到旁路資料庫與 filestore，驗證 26 顆已安裝模組、18 個附件引用、映像 digest 與 DB OID；預備階段正式 `/web/health` 持續 200。短暫停 web／gateway 後在同一個 PG transaction 改名兩庫，交換 filestore，重啟並跑 quick smoke。回退再交換回原資料庫與 filestore，原實例恢復健康；加入容量檢查、預備結果 24 小時期限與切換後舊資料至少保留 24 小時的 finalize 閘。兩輪切換／回退各通過 quick smoke 16/16，旁路資料已安全丟棄。這是線上預備、短暫切換，不宣稱零停機。
 - Cloudflare Tunnel 連到 PaaS Access 61。新建第五條路由 `odoo-openclaw.woowtech.io` 時先指向 `http_status:503`；設定路由專屬 Cloudflare Access app、Email OTP 及 `woowtech@designsmart.com.tw` 的 allow policy，確認未登入外網請求回 302 至 `woowtech.cloudflareaccess.com` 後，才切到 `http://localhost:18080`。PaaS 與本機 Tunnel 同步狀態均顯示 `protected=True`、目標 URL 正確、無待發布或 Odoo 專屬問題；Tunnel 容器內直連 gateway 的 `/web/login` 回 200，外網未登入的 `/web/login` 仍回 302 到 Access。尚需實際完成 Email OTP 後驗證瀏覽器中的 Odoo 登入頁與管理員操作。
+- 公開入口啟用後，依使用者原先提供的初始值同步了 Odoo 管理員密碼與私有 `odoo18-odoo-admin-password` secret；在本機 gateway 的 XML-RPC 登入通過，密碼未寫入版本庫。含新憑證與資料庫的校驗備份為本機私有 `odoo18-20261110T022753Z.tar`。
 
 現有差距：PaaS 來源差異增量升級計畫、遠端備份目的地、HA Supervisor Ingress、真實即時事件、外部 SMTP TLS／帳號及 Access 登入後的完整外網操作尚未驗收。PaaS platform 的約 40 顆模組與控制面不列入 tenant cloud 範圍。
