@@ -64,11 +64,13 @@ check "tenant database name renders" grep -Fqx 'db_name = odoo' <<<"$conf"
 # create the database, or Odoo starts it first with the default admin/admin login.
 render_tenant_conf() (
   local env_file=$1 out=$2
-  # shellcheck source=../scripts/common.sh
+  # shellcheck source=scripts/common.sh
   . "$REPO/scripts/common.sh"
-  # shellcheck source=../scripts/odoo-helpers.sh
+  # shellcheck source=scripts/odoo-helpers.sh
   . "$REPO/scripts/odoo-helpers.sh"
+  # shellcheck disable=SC2317 # These mocks are called by the sourced renderer.
   app_secret_read() { printf '%s' 'test-only-password'; }
+  # shellcheck disable=SC2317
   ql_secret_ensure() { printf '%s\n' "$ODOO_CONF" >"$out"; }
   ql_env_load "$env_file"
   odoo_render_conf_secret

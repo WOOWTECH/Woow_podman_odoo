@@ -104,7 +104,7 @@ if ((include_secrets)); then
   for db in "${dbs[@]}"; do
     secret="odoo18-$db-admin-password"
     if podman secret exists "$secret"; then
-      mkdir -p -m 700 "$root/secrets/db-admin"
+      [[ -d $root/secrets/db-admin ]] || mkdir -m 700 "$root/secrets/db-admin"
       (umask 077 && app_secret_read "$secret" >"$root/secrets/db-admin/$db") \
         || ql_die "cannot read first administrator secret for $db"
       [[ -s $root/secrets/db-admin/$db ]] || ql_die "first administrator secret for $db is empty"
