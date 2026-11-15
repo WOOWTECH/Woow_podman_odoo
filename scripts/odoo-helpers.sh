@@ -327,7 +327,10 @@ SQL
     -c 'ALTER ROLE odoo NOSUPERUSER NOCREATEDB NOCREATEROLE' >/dev/null
   initialized=$(podman exec odoo18-db psql -X -U postgres -d odoo -Atqc \
     "SELECT to_regclass('public.ir_module_module') IS NOT NULL")
-  [[ $initialized == t ]] || odoo_tenant_init_base "$db"
+  if [[ $initialized != t ]]; then
+    odoo_tenant_init_base "$db"
+    ODOO_TENANT_FRESH=1
+  fi
 }
 
 # First install runs entirely before the web and gateway services. -i base is never run
