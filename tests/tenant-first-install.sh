@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Drive the actual bootstrap helper with controlled PostgreSQL answers.
+# shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=../scripts/odoo-helpers.sh

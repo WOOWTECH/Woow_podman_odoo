@@ -329,6 +329,7 @@ SQL
     "SELECT to_regclass('public.ir_module_module') IS NOT NULL")
   if [[ $initialized != t ]]; then
     odoo_tenant_init_base "$db"
+    # shellcheck disable=SC2034 # read by install.sh to adopt only a newly initialized database
     ODOO_TENANT_FRESH=1
   fi
 }
